@@ -1,0 +1,394 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "web-search-prime-fixer v1.0 — Local MCP alias-fixing proxy",
+      "status": "Researching",
+      "description": "The complete MVP: a single Go binary (stdlib only) that transparently proxies the z.ai web-search-prime MCP Streamable HTTP server. It performs exactly one mutation — renaming configured aliases (query, q, search, searchQuery, search_term) to the canonical 'search_query' parameter on outbound tools/call requests — and prepends a terse teaching warning to the matching SSE result so the agent learns the correct name and does not retry. All other traffic passes through byte-for-byte. Research artifacts: plan/001_c0abc3757e9a/architecture/system_context.md (greenfield state + validated z.ai schema) and external_deps.md (stdlib feasibility, 6 points verified against go1.26.4 source).",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Foundation — module, config, logging, bootstrap",
+          "status": "Planned",
+          "description": "A binary that boots, loads config (runs with no config file via built-in defaults), emits structured redacted JSON logs to stderr, serves GET /healthz, and transparently forwards all other traffic to the z.ai upstream with streaming responses. This is PRD §20 step 1: de-risk the transport contract (PRD §8) end-to-end before building rewrite/SSE logic. The forward-and-stream core built here is REUSED as the passthrough branch by P1.M4 (no rework).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Go module + package skeleton",
+              "status": "Planned",
+              "description": "Initialize the Go module, package doc comment, and the empty source files so the tree compiles. Establishes the module name and go directive referenced by every later subtask.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "go.mod + doc.go + package skeleton",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.8/h3.12", "h2.17", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Greenfield project (plan/001_c0abc3757e9a/architecture/system_context.md). Installed toolchain go1.26.4 satisfies PRD floor 'go 1.22+'. Run `go mod init web-search-prime-fixer` and set directive `go 1.22` (the conservative floor, not 1.26).\n2. INPUT: None. This is the root of the dependency tree.\n3. LOGIC: Create go.mod (module web-search-prime-fixer, go 1.22, ZERO requires — stdlib only per PRD §6/§9). Create doc.go with the package comment (`// Package main ...`) per PRD §9. Create empty placeholders is NOT required; only create go.mod and doc.go now. Verify `go build ./...` succeeds with no files yet is impossible, so also create a minimal main.go containing only `package main` + a `func main(){}` stub so `go vet ./...` and `go build ./...` pass; later subtasks (P1.M1.T4) will populate main(). Create testdata/ directory.\n4. OUTPUT: A compiling module `web-search-prime-fixer` (package main) with go.mod (go 1.22, no deps), doc.go, and a stub main.go. Consumed by every subsequent subtask.\n5. DOCS: [Mode A] doc.go package comment is the deliverable here (PRD §9). No external doc files yet."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Configuration (config.go)",
+              "status": "Planned",
+              "description": "Config struct, built-in defaults, JSON file discovery (WSPF_CONFIG / cwd / XDG), env-var overrides, and validation. With defaults, the proxy runs with no config file at all (PRD §14.2).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Config struct + defaults + JSON loading",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.13/h3.21", "h2.13/h3.22", "h2.4/h3.4"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: JSON tags use snake_case per PRD §14.1 JSON form. encoding/json ignores unknown fields by default if you decode into the struct with json.Unmarshal (do NOT use DisallowUnknownFields — PRD §14.3 says 'Unknown fields are ignored').\n2. INPUT: Module from P1.M1.T1.S1.\n3. LOGIC: Define `type Config struct` exactly per PRD §14.1: Upstream, Listen, Path string; Aliases []string; TargetParam, LogLevel string. JSON tags: upstream, listen, path, aliases, target_param, log_level. Provide `func DefaultConfig() Config` returning the PRD §14.2 defaults verbatim (Upstream https://api.z.ai/api/mcp/web_search_prime/mcp, Listen 127.0.0.1:8787, Path /mcp, Aliases [query,q,search,searchQuery,search_term], TargetParam search_query, LogLevel info). Provide `func LoadConfig(path string) (Config, error)` that starts from DefaultConfig(), if path!=\"\" reads the file and json.Unmarshal over it (file values override defaults field-by-field; omitted fields keep defaults). Write config_test.go: defaults have expected values; a partial JSON file overrides only named fields; unknown fields are ignored without error.\n4. OUTPUT: `Config` struct + `DefaultConfig()` + `LoadConfig(path)` for P1.M1.T2.S2 (discovery) and P1.M1.T4 (bootstrap).\n5. DOCS: [Mode A] Add a doc comment on `type Config` documenting each field and the snake_case JSON key. No external doc file (config.example.json is P1.M5.T3)."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S2",
+                  "title": "Config discovery (file + env) + overrides + validation",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T2.S1"],
+                  "prd_selectors": ["h2.13/h3.23", "h2.13/h3.21", "h2.15"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Use os.UserConfigDir() for the XDG base (it resolves $XDG_CONFIG_HOME or ~/.config portably). PRD §14.3 precedence: env WSPF_CONFIG > ./web-search-prime-fixer.json > $XDG_CONFIG_HOME/web-search-prime-fixer/config.json > defaults. Env overrides are HIGHEST precedence and apply AFTER file load.\n2. INPUT: Config, DefaultConfig(), LoadConfig(path) from P1.M1.T2.S1.\n3. LOGIC: `func ResolveConfig() (Config, error)`: (1) pick path = WSPF_CONFIG env if set, else first existing of ./web-search-prime-fixer.json or os.UserConfigDir()/web-search-prime-fixer/config.json, else \"\" (defaults). (2) LoadConfig(path). (3) Apply env overrides WSPF_UPSTREAM, WSPF_LISTEN, WSPF_LOG_LEVEL (only if non-empty). (4) Validate: Listen must contain a parseable host:port (use net.SplitHostPort); Upstream must be an absolute URL (url.Parse, IsAbs()); on failure return a clear error. (5) If TargetParam==\"\" force it to search_query (PRD §14.3). MOCKING: no external services; pure function over os env/filesystem (test by setting env + temp dirs + t.Setenv).\n4. OUTPUT: `ResolveConfig() (Config, error)` returning a fully-validated Config for P1.M1.T4.S1. Logs resolved config at startup (no creds ever present).\n5. DOCS: [Mode A] Document the discovery precedence and env vars in a doc comment on ResolveConfig. This is a config-surface change; the final README sweep (P1.M5.T3.S1) will surface WSPF_* env vars to users."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T3",
+              "title": "Redacting structured logger",
+              "status": "Planned",
+              "description": "Structured JSON-lines logger writing to stderr (keeps stdout clean for process supervisors). Wraps output so Authorization/Cookie/Set-Cookie/Proxy-Authorization are printed as <redacted>. Defined in main.go (app-lifecycle infra) and injected into the proxy handler.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T3.S1",
+                  "title": "Structured JSON logger to stderr with header redaction",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.12", "h2.14", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6 'No secrets in logs. The Authorization header is never logged.' and §13 redacts Authorization, Cookie, Set-Cookie, Proxy-Authorization. Use encoding/json to emit one object per line to os.Stderr. Level filtering: debug<info<warn<error.\n2. INPUT: Module from P1.M1.T1.S1.\n3. LOGIC: Define in main.go a logger type, e.g. `type logger struct { w io.Writer; level int }` and `func newLogger(w io.Writer, level string) *logger`. Method `func (l *logger) log(level string, msg string, fields map[string]any)` that: respects level, builds a map with ts (RFC3339 time), level, msg, then fields; marshals to one JSON line; writes + newline. Provide a helper `func redactHeaders(h http.Header) map[string]any` that copies header names/values but replaces the value of Authorization/Cookie/Set-Cookie/Proxy-Authorization with the literal \"<redacted>\". Write main_test.go (or logger_test.go): a header map with Authorization produces {\"Authorization\":\"<redacted>\"}; level filtering drops debug when level=info; output is valid JSON. MOCKING: write to a bytes.Buffer in tests (not real stderr).\n4. OUTPUT: `*logger` + `newLogger` + `redactHeaders` for P1.M1.T4.S1 (startup/shutdown logs) and P1.M4.T3.S1 (rewrite/upstream_error/forward logs).\n5. DOCS: [Mode A] Doc comment on the logger type and redactHeaders noting which headers are redacted and that output goes to stderr. No external doc file."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T4",
+              "title": "Bootstrap — server, /healthz, passthrough, graceful shutdown",
+              "status": "Planned",
+              "description": "main() loads config, builds the logger, registers /healthz and a minimal transparent passthrough handler that streams responses, and shuts down gracefully on SIGINT/SIGTERM. The passthrough forward-and-stream core is reused verbatim as the streamThrough branch by P1.M4.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T4.S1",
+                  "title": "main() bootstrap + /healthz + version + startup log",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S2", "P1.M1.T3.S1"],
+                  "prd_selectors": ["h2.15", "h2.8", "h2.17", "h2.14"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §16 health returns 200 {\"ok\":true,\"version\":\"<version>\"} and must NOT touch upstream. Version via -ldflags \"-X main.version=...\" defaulting to \"dev\" (package-level `var version = \"dev\"`). PRD §15 startup logs resolved config (aliases, listen, upstream, log level) — NEVER credentials.\n2. INPUT: ResolveConfig() from P1.M1.T2.S2; newLogger from P1.M1.T3.S1.\n3. LOGIC: In main(): cfg,_ := ResolveConfig(); log := newLogger(os.Stderr, cfg.LogLevel); log startup event with aliases/listen/upstream/log_level (no Authorization anywhere). Declare `var version = \"dev\"`. Register `mux.HandleFunc(\"/healthz\", healthHandler)` returning 200 + JSON {\"ok\":true,\"version\":version}. Register the passthrough handler (P1.M1.T4.S2) for all other paths. PRD §9: only /healthz is intercepted; everything else forwards regardless of path. MOCKING: healthHandler is a pure function — test it directly (assert 200, ok:true, version).\n4. OUTPUT: A booting main() with /healthz wired, consuming the handler from P1.M1.T4.S2.\n5. DOCS: [Mode A] None beyond inline comments — no user-facing surface change beyond what config/health already define."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T4.S2",
+                  "title": "Minimal transparent passthrough handler + graceful shutdown",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T4.S1"],
+                  "prd_selectors": ["h2.4/h3.0", "h2.10/h3.16", "h2.10/h3.17", "h2.16", "h2.7", "h2.12"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/external_deps.md §4 confirms a MANUAL handler is correct (not httputil.ReverseProxy) because P1.M4 needs request-side body mutation + conditional response. §5 confirms: use req.WithContext(r.Context()) for client-disconnect propagation, do NOT set http.Client.Timeout (would cut SSE), set Transport.ResponseHeaderTimeout=30s. §2 confirms io.Copy streams without buffering and http.Flusher flushes SSE. Build the forward core to be REUSED by P1.M4 — expose a `forwardStream(rw, upstreamReq, body []byte, log)`-style helper.\n2. INPUT: Config (Upstream) from P1.M1.T2; logger from P1.M1.T3; main/mux from P1.M1.T4.S1.\n3. LOGIC: Build an *http.Client once with Transport{ResponseHeaderTimeout:30s} and sensible dial/TLS/h2 defaults (use http.DefaultTransport cloned, set ResponseHeaderTimeout). Handler: build POST to cfg.Upstream with r.Body (io.Copy into the upstream request, or read bytes — M4 will read bytes for rewrite; here stream r.Body through). Copy request headers verbatim EXCEPT hop-by-hop (Connection, Keep-Alive, Transfer-Encoding, TE, Trailer, Upgrade, Proxy-Authorization, Proxy-Authenticate — the exact stdlib hopHeaders list per external_deps.md §4). Forward Authorization, Content-Type, Accept, Mcp-Session-Id, Accept-Language, User-Agent. If client omitted Accept, set 'application/json, text/event-stream' (the text/event-stream token is REQUIRED per PRD §8 or z.ai returns empty). Set outReq = outReq.WithContext(r.Context()). Send; copy upstream status + non-hop-by-hop response headers (Content-Type, Mcp-Session-Id, Cache-Control, Vary, X-Log-Id) verbatim. Then io.Copy(rw, resp.Body) and flush if rw is http.Flusher. Graceful shutdown: signal.Notify(SIGINT/SIGTERM) -> server.Shutdown(ctx with 10s deadline) -> log shutdown -> exit. MOCKING: unit-test with httptest.Server as a fake upstream returning a canned SSE initialize (per PRD §8) — assert the SSE body and mcp-session-id header reach the client; test Accept fallback. The real-z.ai initialize smoke test is a MANUAL verification (needs API key), noted but not automated here (httptest e2e is P1.M5).\n4. OUTPUT: A transparent passthrough handler that streams SSE responses unchanged, plus a reusable forward helper, consumed and EXTENDED (not rewritten) by P1.M4.T1/P1.M4.T2.\n5. DOCS: [Mode A] None — internal plumbing, no new user-facing/config surface."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "The rewrite rule (rewrite.go)",
+          "status": "Planned",
+          "description": "A pure, table-tested function that renames configured aliases to TargetParam ('search_query') in a tools/call arguments map. No I/O, no external calls — fully unit-testable. PRD §10, §19.1. This is PRD §20 step 2.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "Rewrite function + algorithm + table tests",
+              "status": "Planned",
+              "description": "RewriteResult type and the Rewrite(args, aliases, target) pure function implementing the PRD §10 algorithm, with the full section-10 example table green.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "RewriteResult + Rewrite algorithm (core table rows)",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.9", "h2.9/h3.13", "h2.9/h3.14", "h2.2", "h2.18/h3.24"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/external_deps.md §6 — Go map iteration is NON-deterministic, so the algorithm MUST iterate the `aliases []string` SLICE in config order to make 'first alias promoted' deterministic. NEVER range over the args map to pick an alias. rewrite.go is a pure function with zero imports beyond possibly reflect/slices; fully testable in isolation.\n2. INPUT: A `map[string]any` args object, `aliases []string` (config order), `target string`.\n3. LOGIC: Define `type RewriteResult struct { Changed bool; Notes []string }` and `func Rewrite(args map[string]any, aliases []string, target string) RewriteResult` exactly per PRD §10 algorithm: (1) if args==nil || target==\"\" || len(aliases)==0 -> unchanged. (2) present = aliases (config order) that exist as keys in args, DE-DUPED (PRD §19.1: duplicate alias entries produce no double note). (3) present empty -> unchanged. (4) if target already a key: delete each present alias, note `ignored \"<alias>\" (use only \"<target>\")`, Changed=true. (5) else: chosen=present[0]; args[target]=args[chosen]; delete chosen; note `\"<chosen>\" is not a valid parameter; renamed to \"<target>\"`; delete each remaining present[1:], note `dropped redundant \"<alias>\"`; Changed=true. Non-alias keys NEVER touched (PRD §3). Write rewrite_test.go covering the PRD §10 Examples table: {query:x}->{search_query:x}; {searchQuery:x}; {q:x}; {query:x,q:y}; {query:x,search_query:y}; {search_query:x} unchanged; {foo:bar} unchanged; {} unchanged.\n4. OUTPUT: `RewriteResult` + `Rewrite()` mutating args in place, returning Notes consumed by P1.M3.T3.S1 (warningText) and P1.M4.T1.S1 (request handling).\n5. DOCS: [Mode A] Doc comment on Rewrite documenting the algorithm, alias-order determinism, and the in-place mutation contract."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S2",
+                  "title": "Rewrite edge cases + tests (de-dup, ordering, non-string values, nil/empty)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M2.T1.S1"],
+                  "prd_selectors": ["h2.18/h3.24", "h2.9/h3.13", "h2.9/h3.14", "h2.2"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §19.1 enumerates the edge cases beyond the core table. Non-string alias VALUES (numbers, objects, arrays) must be carried through as-is to the target — Rewrite only moves/renames keys, never inspects or coerces values.\n2. INPUT: Rewrite() from P1.M2.T1.S1.\n3. LOGIC: Extend rewrite_test.go with PRD §19.1 cases: nil args and empty args (unchanged); args with no alias (unchanged); alias list ORDERING — aliases [q,query] with {q:y,query:x} promotes q (NOT query), proving config order matters; duplicate alias entries in config ([query,query]) de-duped with no double note; non-string alias values ({query: 123}, {query: {k:1}}, {query: [1,2]}) carried through unchanged to search_query. MOCKING: none — pure function.\n4. OUTPUT: A fully-green rewrite_test.go; Rewrite is finalized and frozen for P1.M3/P1.M4.\n5. DOCS: [Mode A] None — test-only, no surface change."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "SSE warning injection (sse.go)",
+          "status": "Planned",
+          "description": "SSE event reader (WHATWG framing) and the warning injector that prepends a text content block to a rewritten tools/call result, plus golden wire-format fixtures. PRD §12, §19.2, §19.4. This is PRD §20 step 3. Depends on P1.M2 (RewriteResult.Notes feeds warningText).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T2",
+              "title": "SSE golden fixtures (testdata)",
+              "status": "Planned",
+              "description": "Captured-from-spec wire-format fixtures so tests never depend on the live z.ai server. PRD §19.4, §8.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T2.S1",
+                  "title": "testdata/initialize.sse + testdata/tools_call.sse (verified wire format)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.18/h3.27", "h2.7/h3.8", "h2.7/h3.9", "h2.7/h3.10"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §8 gives the EXACT verified wire format (note: real wire has NO space after `data`). Use the literal bytes from PRD §8. initialize.sse = the id:1/event:message/data:{...initialize...} block (protocolVersion 2024-11-05, serverInfo mcp-web-search-prime 0.0.1). tools_call.sse = a data:{...result.content:[{type:text,text:\"<json string>\"}],isError:false} block where the text payload is a JSON-encoded STRING (stringified array), NOT an object (PRD §8 tools/call response).\n2. INPUT: Module + testdata/ dir from P1.M1.T1.S1.\n3. LOGIC: Create testdata/initialize.sse and testdata/tools_call.sse as static files matching PRD §8 byte-for-byte framing (id:/event:/data: with no space after data:, blank line terminator). Include at least one multi-line `data:` variant for the round-trip test, and ensure the tools_call text payload is valid stringified JSON. These are read by sse_test.go (P1.M3) and proxy_test.go (P1.M5). MOCKING: these fixtures ARE the mock for the live server.\n4. OUTPUT: testdata/initialize.sse, testdata/tools_call.sse consumed by P1.M3.T1.S1, P1.M3.T3.S2, P1.M5.T1.\n5. DOCS: [Mode A] None — test fixtures, not user-facing."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M3.T1",
+              "title": "SSE event reader/parser",
+              "status": "Planned",
+              "description": "Decode an SSE byte stream into Event structs per WHATWG/RFC 8895 framing. Handles comments, field:value space-stripping, multi-line data concatenation, blank-line dispatch, and EOF final-event flush.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S1",
+                  "title": "SSE Event type + reader (WHATWG framing, unbounded lines, EOF flush)",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M3.T2.S1"],
+                  "prd_selectors": ["h2.11/h3.18", "h2.7/h3.10", "h2.18/h3.25"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/external_deps.md §2 confirms NO stdlib SSE framer exists — hand-roll it. CRITICAL FINDING (external_deps.md, 'bufio.Scanner 64KB token limit'): bufio.Scanner with ScanLines FAILS on tokens >64KB; z.ai high-context results can exceed this. Use `bufio.Reader.ReadString('\\n')` (unbounded line length) — NOT bufio.Scanner. Per WHATWG (external_deps.md §3): lines starting with ':' are comments; 'field: value' strips ONE leading space after colon; consecutive data: lines join with '\\n'; blank line dispatches the event; a final event with no trailing blank line MUST still be dispatched at EOF.\n2. INPUT: An io.Reader over the upstream SSE body; testdata fixtures from P1.M3.T2.S1.\n3. LOGIC: Define `type Event struct { ID, Type, Data string }` (Type defaults to \"message\"). Define `type Reader struct { r *bufio.Reader; ... }` and `func NewSSEReader(r io.Reader) *Reader` + `func (rd *Reader) Next() (Event, error)` returning io.EOF when done. Implement framing per the WHATWG rules above using bufio.Reader.ReadString('\\n'); trim trailing \\r\\n; accumulate data lines; dispatch on blank line; flush accumulator at EOF. Write sse_test.go: decode testdata/initialize.sse -> Event{ID:1,Type:message,Data:<json>}; multi-line data: round-trips (split on write / join on read preserves content); a large (>64KB) data line parses without error (proves bufio.Reader choice).\n4. OUTPUT: `Event` + `SSEReader.Next()` yielding decoded events for P1.M3.T3.S2 (injector) and P1.M4.T2.S2 (response path).\n5. DOCS: [Mode A] Doc comment on SSEReader/Event documenting the framing rules and the bufio.Reader (not Scanner) choice with rationale."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M3.T3",
+              "title": "Warning injector + warningText",
+              "status": "Planned",
+              "description": "Builds the human-readable warning line from RewriteResult.Notes, and the injector that, for a rewritten tools/call result event, prepends a {type:text,text:warning} content block and re-emits the event with correct SSE framing.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T3.S1",
+                  "title": "warningText(notes) format (renamed/ignored/dropped + suffix rules)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M2.T1.S1"],
+                  "prd_selectors": ["h2.11/h3.20", "h2.6/h3.6", "h2.9/h3.13"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §12.3 specifies the exact format and the suffix rule. Notes come from Rewrite (P1.M2.T1.S1): renamed -> `\"<x>\" is not a valid parameter; renamed to \"search_query\"`; dropped -> `dropped redundant \"<x>\"`; ignored -> `ignored \"<x>\" (use only \"search_query\")`.\n2. INPUT: `[]string` notes from RewriteResult (P1.M2.T1.S1).\n3. LOGIC: `func warningText(notes []string) string` returns a single line: `[web-search-prime-fixer] <note[0]>; <note[1]>; ... .` followed by a suffix. Suffix rule (PRD §12.3): if EVERY note is an 'ignored' note -> suffix ` Use only \"search_query\" to avoid this notice.`; otherwise -> suffix ` Use \"search_query\" in future calls.`. Notes are joined with '; '. Write sse_test.go cases for the two PRD §12.3 examples: {query:x} -> `[web-search-prime-fixer] \"query\" is not a valid parameter; renamed to \"search_query\". Use \"search_query\" in future calls.`; {query:x,q:y} -> renamed + dropped + future-calls suffix; {query:x,search_query:y} -> ignored + avoid-notice suffix. MOCKING: pure function.\n4. OUTPUT: `warningText(notes)` for P1.M3.T3.S2 (injector).\n5. DOCS: [Mode A] Doc comment on warningText documenting the two suffix rules."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T3.S2",
+                  "title": "SSE inject — prepend warning into tools/call result, re-emit with framing",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M3.T1.S1", "P1.M3.T3.S1", "P1.M3.T2.S1"],
+                  "prd_selectors": ["h2.11/h3.19", "h2.4/h3.2", "h2.7/h3.9", "h2.7/h3.10", "h2.18/h3.25"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §8 tools/call result.content is an array of {type,text}; the text payload is a STRINGIFIED JSON array. The warning is prepended as a NEW {type:\"text\",text:warningText} element at index 0; the original content elements are unchanged and remain valid. PRD §3/F-R3: NEVER set isError:true. On re-emit, split any internal newlines in data back into multiple data: lines (WHATWG round-trip).\n2. INPUT: SSEReader (P1.M3.T1.S1) yielding Events; warningText (P1.M3.T3.S1); the SET of rewritten request ids (provided by P1.M4.T1.S1 at runtime); testdata fixtures (P1.M3.T2.S1).\n3. LOGIC: `func Inject(rw io.Writer, body io.Reader, rewrittenIDs map[any]bool, warning string) error` (or a streaming variant over SSEReader): for each Event, parse Data as JSON; if it's not an object, or its `id` is NOT in rewrittenIDs, or it has no `result.content` array, or result is an error result -> re-emit the event UNCHANGED. Otherwise: result.content = append([{type:text,text:warning}], existingContent...); re-serialize; re-emit preserving original Event.ID and Event.Type; encode data with internal newlines split into multiple `data:` lines. Never touch isError. Write a writer `emitEvent(w, Event)` producing `id:..\\nevent:..\\ndata:..\\n\\n` framing. sse_test.go (PRD §19.2): inject into testdata/tools_call.sse -> content[0] is the warning, content[1..] unchanged and still valid JSON; event whose id not in set -> verbatim; non-tools/call result (initialize) -> verbatim; error result (no content array) -> verbatim; multi-data-line round-trip preserved.\n4. OUTPUT: An Inject/emit pipeline consumed by P1.M4.T2.S2 (the rewritten response path).\n5. DOCS: [Mode A] Doc comment on Inject documenting the id-correlation, prepend-only, isError-untouched, and passthrough-on-no-content rules."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M4",
+          "title": "Proxy integration (proxy.go)",
+          "status": "Planned",
+          "description": "Wire Rewrite into the request path and SSE Inject into the response path inside the handler from P1.M1.T4, with full header handling, the redacting logger's request events, and timeout/robustness. This is PRD §20 step 4 and PRD §11/§13/§17. The P1.M1.T4.S2 passthrough core becomes the streamThrough=true branch.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M4.T1",
+              "title": "Request-side handling — read body, decide rewrite, re-serialize",
+              "status": "Planned",
+              "description": "Read the full request body, detect tools/call, apply Rewrite, track rewritten request ids, and choose between forwarding original bytes (passthrough) or re-serialized bytes (rewrite). PRD §11.1.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T1.S1",
+                  "title": "Body parse + tools/call detection + Rewrite wiring + reqID tracking",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T4.S2", "P1.M2.T1.S1"],
+                  "prd_selectors": ["h2.10/h3.15", "h2.9", "h2.4/h3.1", "h2.2"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §11.1: MCP requests are small JSON-RPC objects — safe to read fully into memory. Defensively handle a JSON ARRAY body (process each element, re-serialize as array). When NOTHING changed, forward the ORIGINAL bytes (no re-serialization) to avoid formatting drift (PRD §11.1 point 4).\n2. INPUT: The passthrough handler core from P1.M1.T4.S2; Rewrite() from P1.M2.T1.S1; Config (Aliases, TargetParam).\n3. LOGIC: In the handler, read full body bytes. json.Unmarshal into a generic value; if it's an array, iterate elements; if object, single. For each JSON-RPC object: if method==\"tools/call\" and params.arguments is an object, call Rewrite(args, cfg.Aliases, cfg.TargetParam). Collect: changedIDs = set of rewritten request `id`s; combined notes (for the warning). If changedIDs empty -> streamThrough=true, forward ORIGINAL body bytes. Else -> re-serialize the (possibly array) body with modified arguments, forward those bytes, and pass changedIDs + warningText(notes) to the response path (P1.M4.T2.S2). Reuse P1.M1.T4.S2's forward helper for the actual upstream POST. MOCKING: unit-test the decision function in isolation (input body bytes -> {forwardBytes, changedIDs, warning}) without a live upstream.\n4. OUTPUT: A decision result {body []byte, streamThrough bool, rewrittenIDs map[any]bool, warning string} consumed by P1.M4.T2.S1 (forward) and P1.M4.T2.S2 (response).\n5. DOCS: [Mode A] Doc comment on the decision function documenting original-bytes passthrough and array handling."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M4.T2",
+              "title": "Upstream forwarding + conditional response writing",
+              "status": "Planned",
+              "description": "Forward the (possibly rewritten) body to upstream with correct headers, copy the response status/headers, then either stream the body verbatim (streamThrough) or feed it through the SSE injector keyed on rewrittenIDs. PRD §11.2, §11.3.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T2.S1",
+                  "title": "Forward to upstream (headers, hop-by-hop strip, Accept fallback, ctx) + response header copy",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M4.T1.S1", "P1.M1.T4.S2"],
+                  "prd_selectors": ["h2.10/h3.16", "h2.10/h3.17", "h2.12", "h2.16", "h2.7"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: external_deps.md §4 — reuse the exact stdlib hopHeaders list when copying (Connection, Proxy-Connection, Keep-Alive, Proxy-Authenticate, Proxy-Authorization, Te, Trailer, Transfer-Encoding, Upgrade); strip on BOTH request and response. §5 — outReq.WithContext(r.Context()) for cancel propagation; NO Client.Timeout; Transport.ResponseHeaderTimeout=30s (already set in P1.M1.T4.S2). Forward Authorization VERBATIM, never read/log it (PRD §13).\n2. INPUT: Decision result (forward bytes) from P1.M4.T1.S1; the *http.Client from P1.M1.T4.S2.\n3. LOGIC: Build outgoing POST to cfg.Upstream with the decision body bytes. Copy request headers verbatim EXCEPT hop-by-hop; forward Content-Type, Accept (fallback 'application/json, text/event-stream' if client omitted — the text/event-stream token is REQUIRED per PRD §8), Authorization, Mcp-Session-Id, Accept-Language, User-Agent. outReq.WithContext(r.Context()). Send. On non-2xx: log upstream_error {status, req_id} (P1.M4.T3.S1) but still copy status+headers+body through (do not synthesize). Copy response status code + non-hop-by-hop headers verbatim (Content-Type, Mcp-Session-Id, Cache-Control, Vary, X-Log-Id). Hand the *http.Response to P1.M4.T2.S2. MOCKING: httptest.Server fake upstream asserting received headers (Authorization present, Accept has text/event-stream, Mcp-Session-Id round-trips).\n4. OUTPUT: An *http.Response with status+headers copied to the client ResponseWriter, body pending streaming decision by P1.M4.T2.S2.\n5. DOCS: [Mode A] None — internal forwarding, no new user-facing surface."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T2.S2",
+                  "title": "Conditional response: passthrough io.Copy vs SSE injection + flush",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M4.T2.S1", "P1.M3.T3.S2", "P1.M3.T1.S1"],
+                  "prd_selectors": ["h2.10/h3.17", "h2.4/h3.0", "h2.4/h3.2", "h2.5", "h2.11"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: external_deps.md §2 — io.Copy for the no-change path (zero buffering, minimal overhead per PRD §6); http.Flusher for SSE streaming so events are not buffered. PRD §11.3: if streamThrough -> io.Copy upstream body to client UNCHANGED; else -> feed upstream body through Inject (P1.M3.T3.S2) keyed on rewrittenIDs. Flush after writing when Content-Type is SSE.\n2. INPUT: *http.Response from P1.M4.T2.S1; decision {streamThrough, rewrittenIDs, warning} from P1.M4.T1.S1; Inject pipeline from P1.M3.T3.S2; SSEReader from P1.M3.T1.S1.\n3. LOGIC: After headers are written (P1.M4.T2.S1): if streamThrough -> io.Copy(rw, resp.Body) verbatim (byte-for-byte, no warning). Else -> Inject(rw, resp.Body, rewrittenIDs, warning) streaming decoded events through the injector and re-emitting. Detect SSE via Content-Type contains 'text/event-stream'; if so, obtain http.Flusher via rw.(http.Flusher) and Flush() after each emitted event. Ensure resp.Body is closed (defer). MOCKING: httptest e2e — passthrough case asserts client body is BYTE-EQUAL to upstream payload (no extra block); rewrite case asserts warning block first then original content.\n4. OUTPUT: A fully functional proxy handler: passthrough streams verbatim; rewritten responses get the warning injected. This completes the core feature.\n5. DOCS: [Mode A] None — internal response handling."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M4.T3",
+              "title": "Logging integration (rewrite / upstream_error / debug forward)",
+              "status": "Planned",
+              "description": "Wire the redacting logger (P1.M1.T3) into the proxy handler for the per-request log events: rewrite, upstream_error, and (debug) forward. PRD §15.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T3.S1",
+                  "title": "rewrite + upstream_error + debug forward log events",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T3.S1", "P1.M4.T1.S1", "P1.M4.T2.S1"],
+                  "prd_selectors": ["h2.14", "h2.12", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §15 events: `rewrite` {req_id, tool (if present), notes, param presence flags} whenever FR-2 changes a call; `upstream_error` {status, req_id} on non-2xx; `debug` adds per-request `forward` lines with method/id and whether response was streamed or injected. Levels honored. NEVER log Authorization (use redactHeaders from P1.M1.T3 if any header context is logged).\n2. INPUT: *logger from P1.M1.T3.S1; decision {rewrittenIDs, notes, streamThrough} from P1.M4.T1.S1; upstream status from P1.M4.T2.S1.\n3. LOGIC: In the handler, emit `rewrite` when changedIDs non-empty (fields: req_id, tool name extracted from params.name if present, notes array, presence flags for each alias); emit `upstream_error` when resp.StatusCode >= 400 (or non-2xx per PRD); emit `forward` at debug level (method, id, streamed-vs-injected). Ensure the logger's level filtering applies (info level suppresses debug forward lines). MOCKING: capture stderr to a buffer in tests; assert a rewrite produces a JSON line with notes and NO Authorization field.\n4. OUTPUT: Full observability per PRD §15; the proxy is feature-complete.\n5. DOCS: [Mode A] None — observability internals; the final README sweep (P1.M5.T3.S1) will document log levels/events to operators."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M5",
+          "title": "End-to-end verification & changeset-level documentation",
+          "status": "Planned",
+          "description": "httptest end-to-end suite proving the PRD §21 success criteria, the final go vet/go test/build quality gate, and changeset-level docs (README + config example). PRD §20 steps 5-7, §19.3, §21. The final Task is the MODE B documentation sweep that depends on every implementing subtask.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M5.T1",
+              "title": "End-to-end httptest suite (proxy_test.go)",
+              "status": "Planned",
+              "description": "A fake upstream httptest.Server plus the real proxy handler, asserting the PRD §19.3 cases end-to-end. Proves the §21 success criteria.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T1.S1",
+                  "title": "Fake upstream + test harness (initialize SSE, session header, Accept assertion)",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M4.T2.S2", "P1.M3.T2.S1"],
+                  "prd_selectors": ["h2.18/h3.26", "h2.7", "h2.16", "h2.8"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §19.3 — stand up a fake upstream httptest.Server returning the initialize SSE response (testdata/initialize.sse) WITH a mcp-session-id header, and assert it receives a request whose Accept contains text/event-stream. Use httptest.NewServer + httptest.NewRequest + the real handler (or a test *http.Client hitting the real listener).\n2. INPUT: The completed proxy handler (P1.M4.T2.S2); testdata fixtures (P1.M3.T2.S1).\n3. LOGIC: Build a reusable test harness: fake upstream that records received headers/body and returns canned SSE from testdata; a Config pointing Upstream at the fake; the real handler wired to it. Helper to send a JSON-RPC request and capture the client-side SSE response + the upstream-received request. MOCKING: the fake upstream IS the mock; no real z.ai calls.\n4. OUTPUT: A test harness + helpers consumed by P1.M5.T1.S2 cases.\n5. DOCS: [Mode A] None — test infra."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T1.S2",
+                  "title": "E2E cases: rewrite+warning, correct-param passthrough, session round-trip, Auth forwarded+redacted, /healthz isolated",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M5.T1.S1", "P1.M4.T3.S1"],
+                  "prd_selectors": ["h2.18/h3.26", "h2.20", "h2.12", "h2.15", "h2.8/h3.11"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: These cases map 1:1 to PRD §19.3 (cases 1-5) and prove PRD §21 success criteria. Case 4 (Authorization) MUST assert the header reaches upstream unchanged AND is absent from captured stderr (redacting logger).\n2. INPUT: Test harness from P1.M5.T1.S1.\n3. LOGIC: Implement proxy_test.go cases: (1) client sends {query:x} -> upstream receives search_query; client SSE result has the warning text block FIRST then original payload. (2) client sends {search_query:x} -> upstream receives it unchanged; client result is BYTE-EQUAL to upstream payload (NO extra block) — proves zero-overhead passthrough (§21). (3) initialize response reaches client with mcp-session-id header intact, and a follow-up request resends Mcp-Session-Id to upstream (inspect upstream-received header). (4) Authorization header from client reaches upstream unchanged AND is ABSENT from the captured stderr log. (5) GET /healthz returns 200 {ok:true,...} and does NOT call the upstream (assert upstream handler never invoked). MOCKING: all via the fake upstream harness.\n4. OUTPUT: A green proxy_test.go proving all PRD §21 success criteria.\n5. DOCS: [Mode A] None — tests."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M5.T2",
+              "title": "Final quality gate",
+              "status": "Planned",
+              "description": "go vet + go test + build clean across the whole module. PRD §20 step 7, §18.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T2.S1",
+                  "title": "go vet ./... + go test ./... + build verification",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M5.T1.S2", "P1.M4.T3.S1"],
+                  "prd_selectors": ["h2.17", "h2.18", "h2.20", "h2.15"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §18 build/test commands; §16 version injection via -ldflags. go.mod has zero requires (verify `go list -m all` shows only the module itself). Confirm no third-party imports leaked in (grep imports).\n2. INPUT: All completed source + tests from P1.M1-P1.M5.T1.\n3. LOGIC: Run `go vet ./...` (clean), `go test ./...` (all green), `go build -o web-search-prime-fixer .` (binary produced), and `go build -ldflags \"-X main.version=0.1.0\"` (version injection works; /healthz reflects it). Audit imports: confirm ONLY stdlib packages are imported (no external requires in go.mod). Fix any lint/test failures discovered. MOCKING: none — module-level tooling.\n4. OUTPUT: A clean, building, fully-tested, stdlib-only binary meeting PRD §18/§20.\n5. DOCS: [Mode A] None — verification step."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M5.T3",
+              "title": "Sync changeset-level documentation",
+              "status": "Planned",
+              "description": "MODE B final documentation task (per SOW §5). Captures the cross-cutting user-facing surface of the entire changeset: README.md (install, run, client config, behavior, success criteria) and config.example.json (documented). Depends on EVERY implementing subtask so it runs last and reflects the final, shipped behavior. Per-feature/JSDoc docs already rode with their implementing subtasks (Mode A); this sweeps the overview-level docs only.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T3.S1",
+                  "title": "README.md — install, run, client config, behavior, env vars",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S2", "P1.M1.T4.S2", "P1.M4.T2.S2", "P1.M4.T3.S1", "P1.M5.T2.S1"],
+                  "prd_selectors": ["h2.6", "h2.6/h3.5", "h2.6/h3.6", "h2.17", "h2.13", "h2.20", "h2.16"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: This is the MODE B changeset-level sweep (SOW §5). All implementing subtasks are complete (dependencies). README must match the SHIPPED behavior, not aspirational text. PRD §7.1 gives the exact client config block; §7.2 the exact warning the agent sees; §18 build/run commands; §16 /healthz; §14 config + WSPF_* env vars.\n2. INPUT: Final behavior from P1.M4.T2.S2 (rewrite + warning), P1.M1.T2.S2 (config/env), P1.M1.T4.S2 (/healthz, listen), P1.M4.T3.S1 (log levels/events), P1.M5.T2.S1 (verified build/test commands).\n3. LOGIC: Write README.md covering: what it does (one-line: local proxy that renames query->search_query for the z.ai web-search-prime MCP tool); why (the problem from PRD §1); install/build (`go build -o web-search-prime-fixer .`); run with defaults and with WSPF_LISTEN/WSPF_CONFIG/WSPF_UPSTREAM/WSPF_LOG_LEVEL; the client MCP config JSON from PRD §7.1 (url -> http://127.0.0.1:8787/mcp, Authorization header carried); the example warning the agent sees (PRD §7.2); /healthz endpoint; config file format reference (pointer to config.example.json); non-goals note (PRD §3 — does NOT normalize location/content_size/etc.). Keep it concise and accurate. Use the write-tech-docs skill if available; no marketing tone.\n4. OUTPUT: README.md reflecting the shipped v1.0.\n5. DOCS: [Mode B] This IS the changeset-level documentation sweep. It must accurately summarize the final behavior of all implementing subtasks."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T3.S2",
+                  "title": "config.example.json + doc.go package comment polish",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S2", "P1.M1.T1.S1", "P1.M5.T2.S1"],
+                  "prd_selectors": ["h2.13", "h2.13/h3.21", "h2.13/h3.22", "h2.8/h3.12"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §9 file layout lists config.example.json and doc.go as deliverables. config.example.json must match the Config schema (snake_case keys) from P1.M1.T2.S1 and the PRD §14.1 JSON form, with inline comments or a sibling explanation (JSON has no comments, so either use a clearly-labeled example with default values or document fields in README — keep the file valid JSON).\n2. INPUT: Config schema/defaults from P1.M1.T2.S2; doc.go from P1.M1.T1.S1; verified state from P1.M5.T2.S1.\n3. LOGIC: Create config.example.json with the PRD §14.1 values (upstream, listen, path, aliases, target_param, log_level) — valid JSON matching DefaultConfig(). Ensure it's valid JSON (no trailing comments). Polish doc.go package comment to accurately describe the proxy, its single rewrite rule, and the non-goals (PRD §3) in a few lines. Verify `go build`/`go test` still pass after doc edits.\n4. OUTPUT: config.example.json + finalized doc.go.\n5. DOCS: [Mode B] Part of the changeset-level documentation sweep; config.example.json is a user-facing config-surface artifact that must reflect the final schema."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

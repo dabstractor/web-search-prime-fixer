@@ -1,0 +1,53 @@
+h1.0 web-search-prime-fixer — Design Doc
+ h2.0 1. Problem
+ h2.1 2. Goal
+ h2.2 3. Non-goals (explicitly out of scope)
+ h2.3 4. Users and context
+ h2.4 5. Functional requirements
+  h3.0 FR-1 Transparent proxy
+  h3.1 FR-2 The one rewrite rule
+  h3.2 FR-3 Terse warning, results preserved
+  h3.3 FR-4 Credentials forwarded, not owned
+  h3.4 FR-5 Configuration
+ h2.5 6. Non-functional requirements
+ h2.6 7. User experience
+  h3.5 7.1 Client configuration
+  h3.6 7.2 What the agent sees
+ h2.7 8. Verified transport contract (z.ai upstream)
+  h3.7 Request
+  h3.8 initialize response
+  h3.9 tools/call response
+  h3.10 SSE framing rules (for the parser/writer)
+  h3.11 Session handling
+ h2.8 9. Architecture
+  h3.12 File layout
+ h2.9 10. The rewrite rule (rewrite.go)
+  h3.13 Algorithm
+  h3.14 Examples
+ h2.10 11. Request handling (proxy.go)
+  h3.15 11.1 Decide whether to rewrite
+  h3.16 11.2 Forward to upstream
+  h3.17 11.3 Write the response
+ h2.11 12. SSE warning injection (sse.go)
+  h3.18 12.1 Reader
+  h3.19 12.2 Inject
+  h3.20 12.3 Warning text format
+ h2.12 13. Headers, credentials, security
+ h2.13 14. Configuration (config.go)
+  h3.21 14.1 Schema
+  h3.22 14.2 Defaults (used when a field is empty or no file exists)
+  h3.23 14.3 Discovery and precedence
+ h2.14 15. Logging
+ h2.15 16. Health and operations
+ h2.16 17. Timeouts and robustness
+ h2.17 18. Building and running
+ h2.18 19. Test plan
+  h3.24 19.1 rewrite_test.go (table-driven)
+  h3.25 19.2 sse_test.go
+  h3.26 19.3 proxy_test.go (httptest end-to-end)
+  h3.27 19.4 Golden fixtures
+ h2.19 20. Implementation order (for the coding agent)
+ h2.20 21. Success criteria
+ h2.21 22. Open defaults chosen (flag for review)
+---
+code:15 para:49 list:28 table:1
