@@ -41,7 +41,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Configuration (config.go)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Config struct, built-in defaults, JSON file discovery (WSPF_CONFIG / cwd / XDG), env-var overrides, and validation. With defaults, the proxy runs with no config file at all (PRD §14.2).",
               "subtasks": [
                 {
@@ -64,7 +64,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Config discovery (file + env) + overrides + validation",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S1"
@@ -82,14 +82,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Redacting structured logger",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Structured JSON-lines logger writing to stderr (keeps stdout clean for process supervisors). Wraps output so Authorization/Cookie/Set-Cookie/Proxy-Authorization are printed as <redacted>. Defined in main.go (app-lifecycle infra) and injected into the proxy handler.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Structured JSON logger to stderr with header redaction",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
