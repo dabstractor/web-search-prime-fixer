@@ -82,14 +82,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Redacting structured logger",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Structured JSON-lines logger writing to stderr (keeps stdout clean for process supervisors). Wraps output so Authorization/Cookie/Set-Cookie/Proxy-Authorization are printed as <redacted>. Defined in main.go (app-lifecycle infra) and injected into the proxy handler.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Structured JSON logger to stderr with header redaction",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -114,7 +114,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T4.S1",
                   "title": "main() bootstrap + /healthz + version + startup log",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2",
