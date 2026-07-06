@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -104,4 +105,102 @@ func redactHeaders(h http.Header) map[string]any {
 	return out
 }
 
-func main() {}
+// version is the proxy's build version, surfaced by GET /healthz. It defaults to
+// "dev" and is overridden at link time:
+//
+//	go build -ldflags "-X main.version=<value>" -o web-search-prime-fixer .
+//
+// It MUST be a package-level var (not local to main) for the linker -X flag to
+// set it (PRD §16). Verified on-disk: default "dev"; ldflags injects any string.
+var version = "dev"
+
+// healthHandler serves GET /healthz. It writes 200 with a JSON body
+// {"ok":true,"version":<version>} and Content-Type application/json.
+//
+// It is a PURE local handler: it performs NO upstream call and reads NO network
+// resource, so it always answers quickly and never depends on z.ai health
+// (PRD §16: "Does not touch the upstream").
+//
+// The body is produced with json.Marshal of two scalars (bool + string), which
+// cannot fail for our inputs; the write to the ResponseWriter is best-effort and
+// its error is ignored, matching net/http handler convention.
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	// PATTERN: set headers BEFORE WriteHeader (once WriteHeader is called, later
+	// Header mutations are ignored).
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	// Marshals to {"ok":true,"version":"<version>"} (keys sorted by json.Marshal;
+	// "ok" < "version"). HTML-escaping does not affect semver.
+	body, _ := json.Marshal(map[string]any{"ok": true, "version": version})
+	_, _ = w.Write(body)
+}
+
+// logStartup emits the "startup" log event: the resolved configuration the proxy
+// is actually running with (PRD §15). Fields: aliases (as a JSON array), listen,
+// upstream, log_level. NEVER credentials — Config carries no credential field
+// (PRD §13: Authorization is forwarded as a request header, never owned), so
+// logging cfg structurally cannot leak a secret.
+//
+// Extracted as a named function (rather than inlined in main) so it is unit-
+// testable with an injected *bytes.Buffer writer via newLogger(&buf, level).
+func logStartup(l *logger, cfg Config) {
+	l.log("info", "startup", map[string]any{
+		"aliases":   cfg.Aliases, // []string -> JSON array
+		"listen":    cfg.Listen,
+		"upstream":  cfg.Upstream,
+		"log_level": cfg.LogLevel,
+	})
+}
+
+// passthroughHandler is a PLACEHOLDER registered for every non-/healthz path.
+// P1.M1.T4.S2 replaces this stub with the real transparent forwarder (a manual
+// upstream POST that streams SSE responses) and adds graceful shutdown; the
+// registration line `mux.HandleFunc("/", passthroughHandler)` in main is the
+// exact swap target (e.g. -> mux.HandleFunc("/", newProxyHandler(cfg, log))).
+//
+// Until T4.S2 lands, non-health requests get 501 so a partial build can never
+// silently masquerade as a working proxy. /healthz is unaffected and fully
+// functional (PRD §9: only /healthz is intercepted).
+func passthroughHandler(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, `{"error":"passthrough not implemented (P1.M1.T4.S2)"}`, http.StatusNotImplemented)
+}
+
+// main is the proxy bootstrap: resolve config, build the redacting logger, emit
+// the startup event, register the two routes, and serve. Graceful shutdown
+// (SIGINT/SIGTERM -> server.Shutdown, 10s deadline) is P1.M1.T4.S2 — NOT here.
+func main() {
+	// Resolve config (discovery + env overrides + validation). The contract's
+	// `cfg,_` is shorthand: a real error here MUST fail fast (a bad listen address
+	// or missing WSPF_CONFIG file must not silently boot).
+	cfg, err := ResolveConfig()
+	if err != nil {
+		// On the error path cfg.LogLevel is untrusted; log at a fixed "error"
+		// level to os.Stderr (structured JSON, never fmt.Println — PRD §15) and
+		// exit non-zero.
+		newLogger(os.Stderr, "error").log("error", "config", map[string]any{"err": err.Error()})
+		os.Exit(1)
+	}
+
+	// CRITICAL: variable named `log` per the contract. log.log(...) is valid Go
+	// (selector resolves method-on-value; var name != method name namespace).
+	log := newLogger(os.Stderr, cfg.LogLevel)
+	logStartup(log, cfg)
+
+	// Route table (PRD §9): /healthz intercepted; EVERYTHING else forwards.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", healthHandler) // exact match
+	mux.HandleFunc("/", passthroughHandler)   // subtree catch-all (T4.S2 swaps this)
+
+	// CRITICAL: NO ReadTimeout/WriteTimeout — a write deadline would truncate the
+	// streamed SSE responses (PRD §8/§11.3, P1.M3/P1.M4). Addr+Handler only. T4.S2
+	// calls srv.Shutdown(ctx) on this object.
+	srv := &http.Server{Addr: cfg.Listen, Handler: mux}
+
+	// ListenAndServe blocks until error or Shutdown. ErrServerClosed is the normal
+	// return when Shutdown is called (T4.S2 adds that path); treat it non-fatal so
+	// T4.S2 is a pure addition (no spurious "listen" error on graceful exit).
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.log("error", "listen", map[string]any{"err": err.Error(), "listen": cfg.Listen})
+		os.Exit(1)
+	}
+}
