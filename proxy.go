@@ -124,16 +124,22 @@ func newProxyHandler(cfg Config, log *logger, client *http.Client) http.HandlerF
 }
 
 // forward sends outReq via client and streams the upstream response to rw
-// (PRD §11.3 passthrough path). It is the REUSABLE FORWARD CORE: copy status +
-// non-hop-by-hop response headers, io.Copy the body verbatim, flush for SSE.
+// (PRD §11.2/§11.3). It is the REUSABLE FORWARD CORE: copy status + non-hop-by-hop
+// response headers, stream the body, flush for SSE.
 //
-// dec carries the rewrite decision for this request: dec.body is already set as
-// outReq.Body by the caller (newProxyHandler); dec.streamThrough/rewrittenIDs/
-// warning select the RESPONSE path. P1.M4.T2.S2 EXTENDS the body step:
-// io.Copy (passthrough) when dec.streamThrough, otherwise feed the body through
-// the SSE injector (sse.go Inject) keyed on dec.rewrittenIDs with dec.warning.
-// Until then the body is streamed through unchanged (the rewrite already shaped
-// the REQUEST); dec is received but not yet used here.
+// NON-2xx (P1.M4.T2.S1, PRD §15): when the upstream returns a non-2xx status, an
+// upstream_error line {status, req_id} is logged at warn — but the response is
+// STILL copied through verbatim (status + headers + body). The proxy NEVER
+// synthesizes a 502 for an upstream HTTP error status; synthesis happens only on
+// a transport failure (client.Do error) below.
+//
+// dec carries the rewrite decision. dec.body is already set as outReq.Body by the
+// caller (newProxyHandler); dec.reqID is used for the upstream_error log here;
+// dec.streamThrough/rewrittenIDs/warning select the RESPONSE body path.
+// P1.M4.T2.S2 EXTENDS the body step: io.Copy (passthrough) when
+// dec.streamThrough, otherwise feed the body through the SSE injector (sse.go
+// Inject) keyed on dec.rewrittenIDs with dec.warning. Until then the body is
+// streamed through unchanged.
 func forward(client *http.Client, rw http.ResponseWriter, outReq *http.Request, dec rewriteDecision, log *logger) {
 	resp, err := client.Do(outReq)
 	if err != nil {
@@ -142,6 +148,15 @@ func forward(client *http.Client, rw http.ResponseWriter, outReq *http.Request, 
 		return
 	}
 	defer resp.Body.Close()
+	// NON-2xx: log upstream_error {status, req_id} but DO NOT synthesize — copy
+	// the response through below (PRD §15/§11.3). req_id may be nil (notification/
+	// scalar/unparseable body) -> logged as JSON null, which is acceptable.
+	if resp.StatusCode >= 300 {
+		log.log("warn", "upstream_error", map[string]any{
+			"status": resp.StatusCode,
+			"req_id": dec.reqID,
+		})
+	}
 	// Copy non-hop-by-hop response headers BEFORE WriteHeader (WriteHeader locks
 	// the header map). Content-Type, Mcp-Session-Id, Cache-Control, Vary, X-Log-Id
 	// pass through; Transfer-Encoding/Connection etc. are stripped (hop-by-hop).
@@ -188,6 +203,12 @@ type rewriteDecision struct {
 	// warning is the formatted single-line warning (warningText, sse.go) to prepend
 	// into each rewritten tools/call RESULT. Empty when streamThrough.
 	warning string
+	// reqID is the primary JSON-RPC request id of this request, captured for the
+	// upstream_error log on non-2xx responses (PRD §15). It is the decoded value
+	// (float64 for numeric ids, string for string ids, nil when the body is a
+	// notification / scalar / unparseable). It is ADDITIVE: it does not affect the
+	// rewrite/streamThrough/rewrittenIDs/warning behavior (P1.M4.T2.S1).
+	reqID any
 }
 
 // decideRewrite inspects a JSON-RPC request body and, for every tools/call whose
@@ -211,6 +232,10 @@ type rewriteDecision struct {
 //     the decoded value directly (float64 for numbers — see the id contract below).
 //     This is the correlation key the SSE injector matches against in the response
 //     (sse.go Inject, P1.M3.T3.S2).
+//   - reqID (P1.M4.T2.S1, PRD §15): the FIRST JSON-RPC id seen while iterating is
+//     captured into rewriteDecision.reqID purely for the upstream_error log on a
+//     non-2xx response. It is ADDITIVE — it does not alter streamThrough/
+//     rewrittenIDs/warning/body (the log just needs ONE id to name the request).
 //
 // id contract: numeric JSON-RPC ids decode to float64 in any (id:2 -> float64(2));
 // rewrittenIDs is therefore keyed by float64(2), which is exactly what Inject finds
@@ -236,8 +261,14 @@ func decideRewrite(body []byte, cfg Config) rewriteDecision {
 		notes = append(notes, n...)
 	}
 
+	// reqID is the first JSON-RPC id seen while iterating, threaded for the
+	// upstream_error log on non-2xx responses (P1.M4.T2.S1, PRD §15). It stays nil
+	// for a notification / scalar / unparseable body.
+	var reqID any
+
 	switch v := parsed.(type) {
 	case map[string]any:
+		reqID = v["id"] // capture the (single) request's id for logging
 		if n := rewriteObject(v, cfg); n != nil {
 			addID(v["id"], n)
 		}
@@ -245,6 +276,9 @@ func decideRewrite(body []byte, cfg Config) rewriteDecision {
 		// Defensive JSON-RPC batch (MCP does not use batches): process each element.
 		for _, elem := range v {
 			if obj, ok := elem.(map[string]any); ok {
+				if reqID == nil { // first element's id wins (batch is defensive)
+					reqID = obj["id"]
+				}
 				if n := rewriteObject(obj, cfg); n != nil {
 					addID(obj["id"], n)
 				}
@@ -256,8 +290,9 @@ func decideRewrite(body []byte, cfg Config) rewriteDecision {
 	}
 
 	if len(rewrittenIDs) == 0 {
-		// Nothing changed -> forward ORIGINAL bytes (no re-serialization).
-		return rewriteDecision{body: body, streamThrough: true}
+		// Nothing changed -> forward ORIGINAL bytes (no re-serialization). reqID is
+		// still threaded so a non-2xx can name the request in the log.
+		return rewriteDecision{body: body, streamThrough: true, reqID: reqID}
 	}
 
 	// Something changed -> re-serialize the (possibly array) body. json.Marshal
@@ -274,6 +309,7 @@ func decideRewrite(body []byte, cfg Config) rewriteDecision {
 		streamThrough: false,
 		rewrittenIDs:  rewrittenIDs,
 		warning:       warningText(notes),
+		reqID:         reqID,
 	}
 }
 

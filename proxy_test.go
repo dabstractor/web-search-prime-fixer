@@ -409,3 +409,144 @@ func TestDecideRewrite_UnchangedBodyIsOriginalBytes(t *testing.T) {
 		t.Errorf("unchanged body drifted (should be byte-identical):\n got %q\nwant %q", dec.body, in)
 	}
 }
+
+// captureProxy builds a proxy at upstreamURL whose logger writes to buf at the
+// given level (so warn-level upstream_error lines are observable, unlike
+// newTestProxy's discard-error logger). (P1.M4.T2.S1)
+func captureProxy(t *testing.T, upstreamURL string, buf *bytes.Buffer, level string) *httptest.Server {
+	t.Helper()
+	cfg := DefaultConfig()
+	cfg.Upstream = upstreamURL
+	return httptest.NewServer(newProxyHandler(cfg, newLogger(buf, level), newUpstreamClient()))
+}
+
+// (6) Non-2xx upstream: log upstream_error {status, req_id} BUT copy status +
+// headers + body through unchanged (PRD §15/§11.3; P1.M4.T2.S1 MOCKING).
+func TestForward_Non2xxCopiedThroughAndLogged(t *testing.T) {
+	const errBody = `{"error":"rate limited"}`
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Mcp-Session-Id", testSID)
+		w.WriteHeader(http.StatusServiceUnavailable) // 503
+		_, _ = io.WriteString(w, errBody)
+	}))
+	defer up.Close()
+
+	var buf bytes.Buffer
+	proxy := captureProxy(t, up.URL, &buf, "warn")
+	defer proxy.Close()
+
+	// A tools/call with a numeric id so req_id is non-nil in the log.
+	resp, err := http.Post(proxy.URL, "application/json",
+		strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"arguments":{"search_query":"x"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Copy-through: the client gets 503 + the original body, not a synthesized 502.
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (copy-through, not synthesized)", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != errBody {
+		t.Errorf("body = %q, want %q (copied through verbatim)", got, errBody)
+	}
+	if resp.Header.Get("Mcp-Session-Id") != testSID {
+		t.Error("non-hop-by-hop response header not copied on non-2xx")
+	}
+
+	// Exactly one upstream_error line, with status 503 and req_id 2.
+	var saw bool
+	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		if !bytes.Contains(line, []byte(`"msg":"upstream_error"`)) {
+			continue
+		}
+		if saw {
+			t.Fatalf("more than one upstream_error line:\n%s", buf.String())
+		}
+		saw = true
+		if !bytes.Contains(line, []byte(`"status":503`)) {
+			t.Errorf("upstream_error line missing status 503:\n%s", line)
+		}
+		// req_id 2 marshals as a JSON number (json.Marshal of float64(2) -> "2").
+		if !bytes.Contains(line, []byte(`"req_id":2`)) {
+			t.Errorf("upstream_error line missing req_id 2:\n%s", line)
+		}
+	}
+	if !saw {
+		t.Fatalf("no upstream_error line emitted for 503:\n%s", buf.String())
+	}
+}
+
+// (7) A 2xx response emits NO upstream_error line (the log fires only on non-2xx).
+func TestForward_2xxNoUpstreamError(t *testing.T) {
+	var got http.Request
+	up := fakeUpstream(t, &got) // replies 200 + initSSE
+	defer up.Close()
+	var buf bytes.Buffer
+	proxy := captureProxy(t, up.URL, &buf, "debug") // debug captures everything
+	defer proxy.Close()
+
+	resp, err := http.Post(proxy.URL, "application/json", strings.NewReader(`{"jsonrpc":"2.0","method":"initialize","id":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if bytes.Contains(buf.Bytes(), []byte(`"msg":"upstream_error"`)) {
+		t.Errorf("upstream_error emitted on 200:\n%s", buf.String())
+	}
+}
+
+// (8) Mcp-Session-Id round-trip: client request header -> upstream, and upstream
+// response header -> client (PRD §8/§11; item MOCKING "Mcp-Session-Id round-trips").
+func TestForward_McpSessionIdRoundTrip(t *testing.T) {
+	var got http.Request
+	up := fakeUpstream(t, &got) // echoes mcp-session-id=testSID in the response
+	defer up.Close()
+	proxy := newTestProxy(up.URL)
+	defer proxy.Close()
+
+	const clientSID = "22222222-2222-2222-2222-222222222222"
+	req, _ := http.NewRequest(http.MethodPost, proxy.URL, strings.NewReader(`{"jsonrpc":"2.0","method":"initialize","id":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Mcp-Session-Id", clientSID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// Request side: upstream received the client's Mcp-Session-Id verbatim.
+	if got.Header.Get("Mcp-Session-Id") != clientSID {
+		t.Errorf("upstream Mcp-Session-Id = %q, want %q", got.Header.Get("Mcp-Session-Id"), clientSID)
+	}
+	// Response side: the upstream's mcp-session-id reached the client.
+	if resp.Header.Get("Mcp-Session-Id") != testSID {
+		t.Errorf("client Mcp-Session-Id = %q, want %q", resp.Header.Get("Mcp-Session-Id"), testSID)
+	}
+}
+
+// TestDecideRewrite_ReqID pins that decideRewrite threads the request id for the
+// upstream_error log (P1.M4.T2.S1). Numeric -> float64; string -> string; absent
+// -> nil. Additive to T1.S1's decision (does not affect rewrittenIDs/warning).
+func TestDecideRewrite_ReqID(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want any
+	}{
+		{"numeric_id", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"arguments":{"query":"x"}}}`, float64(2)},
+		{"string_id", `{"jsonrpc":"2.0","id":"abc","method":"tools/call","params":{"arguments":{"query":"x"}}}`, "abc"},
+		{"no_id_notification", `{"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"query":"x"}}}`, nil},
+		{"initialize", `{"jsonrpc":"2.0","method":"initialize","id":1}`, float64(1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dec := decideRewrite([]byte(tc.body), dcCfg)
+			if dec.reqID != tc.want {
+				t.Errorf("reqID = %#v (want %#v); note numeric must be float64, not int", dec.reqID, tc.want)
+			}
+		})
+	}
+}
