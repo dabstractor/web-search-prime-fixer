@@ -95,6 +95,14 @@ func newProxyHandler(cfg Config, log *logger, client *http.Client) http.HandlerF
 		// Decide the rewrite (pure). dec.body is the original bytes when nothing
 		// changed (zero drift) or the re-serialized bytes when an alias was renamed.
 		dec := decideRewrite(body, cfg)
+		// P1.M4.T3.S1 (PRD §15): log the rewrite whenever FR-2 changed a call. Fires
+		// on the REQUEST decision (before forward), so it logs even if the upstream
+		// later errors or the SSE result id doesn't match. Carries NO headers, so
+		// Authorization can never appear (PRD §13; redactHeaders is the documented
+		// tool if a future field adds header context).
+		if !dec.streamThrough {
+			log.log("info", "rewrite", rewriteLogFields(dec))
+		}
 
 		// bytes.NewReader lets net/http set ContentLength (and GetBody for safe
 		// retries) from the actual forwarded length — even after re-serialization
@@ -121,6 +129,16 @@ func newProxyHandler(cfg Config, log *logger, client *http.Client) http.HandlerF
 		// dec.body is already set as outReq.Body; dec.rewrittenIDs + dec.warning
 		// are threaded for P1.M4.T2.S2 (response-side io.Copy-vs-Inject branch).
 		forward(client, rw, outReq, dec, log)
+		// P1.M4.T3.S1 (PRD §15): debug per-request forward line — JSON-RPC method,
+		// id, and whether the response was streamed (io.Copy) or injected (SSE
+		// Inject). Suppressed below debug by the logger's level filter (PRD §15
+		// "Levels honored"; do NOT add a second filter). mode reflects the PATH
+		// decision (dec.streamThrough) — exactly what forward() branched on.
+		log.log("debug", "forward", map[string]any{
+			"method": dec.method, // JSON-RPC method ("" for scalar/unparseable)
+			"id":     dec.reqID,  // float64|string|nil
+			"mode":   forwardMode(dec.streamThrough),
+		})
 	}
 }
 
@@ -264,6 +282,23 @@ type rewriteDecision struct {
 	// notification / scalar / unparseable). It is ADDITIVE: it does not affect the
 	// rewrite/streamThrough/rewrittenIDs/warning behavior (P1.M4.T2.S1).
 	reqID any
+	// --- P1.M4.T3.S1 (observability, PRD §15) — additive; zero existing readers break ---
+	// method is the JSON-RPC method (initialize/tools/call/tools/list/...), captured
+	// for the `forward` debug log line. "" for a scalar / unparseable body. It is
+	// ADDITIVE: it does not affect request/response mechanics.
+	method string
+	// tool is params.name of the rewritten tools/call (the `rewrite` line's "tool"
+	// field). "" when absent/non-string. Set on the rewrite path only.
+	tool string
+	// notes is the per-alias note array (the `rewrite` line's "notes" field). It is
+	// the SAME slice warningText joins into `warning`, so the log and the injected
+	// SSE warning cannot drift. Set on the rewrite path only.
+	notes []string
+	// present is the per-configured-alias presence map (alias -> was-in-arguments),
+	// captured BEFORE Rewrite mutated args (Rewrite deletes the renamed + dropped
+	// aliases, so presence cannot be recomputed from dec.body). Set on the rewrite
+	// path only.
+	present map[string]bool
 }
 
 // decideRewrite inspects a JSON-RPC request body and, for every tools/call whose
@@ -320,12 +355,26 @@ func decideRewrite(body []byte, cfg Config) rewriteDecision {
 	// upstream_error log on non-2xx responses (P1.M4.T2.S1, PRD §15). It stays nil
 	// for a notification / scalar / unparseable body.
 	var reqID any
+	// P1.M4.T3.S1 (PRD §15): additive observability fields captured alongside
+	// reqID. `method` is captured on every valid object (for the debug `forward`
+	// line); tool/present/notes are taken from the first CHANGED object (for the
+	// info `rewrite` line) — batch is defensive, so first-changed wins.
+	var (
+		method  string
+		tool    string
+		present map[string]bool
+	)
 
 	switch v := parsed.(type) {
 	case map[string]any:
 		reqID = v["id"] // capture the (single) request's id for logging
-		if n := rewriteObject(v, cfg); n != nil {
-			addID(v["id"], n)
+		if m, ok := v["method"].(string); ok {
+			method = m
+		}
+		if rr := rewriteObject(v, cfg); rr.changed {
+			addID(v["id"], rr.notes)
+			tool = rr.tool
+			present = rr.present
 		}
 	case []any:
 		// Defensive JSON-RPC batch (MCP does not use batches): process each element.
@@ -334,8 +383,17 @@ func decideRewrite(body []byte, cfg Config) rewriteDecision {
 				if reqID == nil { // first element's id wins (batch is defensive)
 					reqID = obj["id"]
 				}
-				if n := rewriteObject(obj, cfg); n != nil {
-					addID(obj["id"], n)
+				if method == "" {
+					if m, ok := obj["method"].(string); ok {
+						method = m
+					}
+				}
+				if rr := rewriteObject(obj, cfg); rr.changed {
+					addID(obj["id"], rr.notes)
+					if tool == "" { // first changed object's tool/present win (batch is defensive)
+						tool = rr.tool
+						present = rr.present
+					}
 				}
 			}
 		}
@@ -345,9 +403,11 @@ func decideRewrite(body []byte, cfg Config) rewriteDecision {
 	}
 
 	if len(rewrittenIDs) == 0 {
-		// Nothing changed -> forward ORIGINAL bytes (no re-serialization). reqID is
-		// still threaded so a non-2xx can name the request in the log.
-		return rewriteDecision{body: body, streamThrough: true, reqID: reqID}
+		// Nothing changed -> forward ORIGINAL bytes (no re-serialization). reqID +
+		// method are still threaded so a non-2xx can name the request in the log
+		// and the debug `forward` line reports the method. tool/notes/present stay
+		// zero-value (the rewrite line won't fire).
+		return rewriteDecision{body: body, streamThrough: true, reqID: reqID, method: method}
 	}
 
 	// Something changed -> re-serialize the (possibly array) body. json.Marshal
@@ -365,28 +425,100 @@ func decideRewrite(body []byte, cfg Config) rewriteDecision {
 		rewrittenIDs:  rewrittenIDs,
 		warning:       warningText(notes),
 		reqID:         reqID,
+		method:        method,
+		tool:          tool,
+		notes:         notes, // the SAME slice warningText joined — authoritative
+		present:       present,
 	}
 }
 
-// rewriteObject applies the alias rewrite to a single JSON-RPC object IN PLACE.
-// It returns the RewriteResult.Notes (nil when nothing changed) so the caller can
-// collect the object's id and join notes into the warning. A non-tools/call
-// method, or a tools/call with absent/non-object params.arguments, is left
-// untouched (PRD §11.1 point 3; §3 — only configured aliases are ever moved).
-func rewriteObject(obj map[string]any, cfg Config) []string {
+// rewriteObject applies the alias rewrite to a single JSON-RPC object IN PLACE
+// and returns what happened plus the observability fields the `rewrite` log needs
+// (P1.M4.T3.S1, PRD §15). A non-tools/call method, or a tools/call with absent/
+// non-object params.arguments, is left untouched and returns a zero-value result.
+//
+// PRE-MUTATION CAPTURE (P1.M4.T3.S1): `present` (per-configured-alias presence)
+// and `tool` (params.name) are read from args/params BEFORE Rewrite mutates args —
+// Rewrite deletes the renamed + dropped aliases, so presence cannot be recomputed
+// from the re-serialized body afterwards. On the unchanged branch present/tool are
+// nil'd out so an unchanged request carries no stale observability data (the
+// rewrite line won't fire anyway).
+func rewriteObject(obj map[string]any, cfg Config) rewriteObjectResult {
+	var res rewriteObjectResult
 	if obj["method"] != "tools/call" {
-		return nil
+		return res
 	}
 	params, ok := obj["params"].(map[string]any)
 	if !ok {
-		return nil
+		return res
+	}
+	if name, ok := params["name"].(string); ok {
+		res.tool = name
 	}
 	args, ok := params["arguments"].(map[string]any)
 	if !ok {
-		return nil
+		return res
 	}
-	if res := Rewrite(args, cfg.Aliases, cfg.TargetParam); res.Changed {
-		return res.Notes
+	// Capture presence BEFORE Rewrite mutates args (Rewrite deletes/renames aliases).
+	res.present = aliasPresence(args, cfg.Aliases)
+	if rr := Rewrite(args, cfg.Aliases, cfg.TargetParam); rr.Changed {
+		res.changed = true
+		res.notes = rr.Notes
+	} else {
+		// Nothing changed: drop the captured present/tool so an unchanged request
+		// does not carry stale observability data (the rewrite line won't fire).
+		res.present = nil
+		res.tool = ""
 	}
-	return nil
+	return res
+}
+
+// aliasPresence reports, for each configured alias (in config order), whether it
+// was a key in args. It iterates cfg.Aliases (NOT args) so the output is stable
+// across runs and covers every configured alias — mirroring rewrite.go's "NEVER
+// range over args" discipline (Go map iteration is randomized). Captured
+// pre-mutation by rewriteObject (PRD §15 presence flags).
+func aliasPresence(args map[string]any, aliases []string) map[string]bool {
+	p := make(map[string]bool, len(aliases))
+	for _, a := range aliases {
+		_, p[a] = args[a]
+	}
+	return p
+}
+
+// rewriteObjectResult is the widened return of rewriteObject (P1.M4.T3.S1): the
+// single tools/call parse point now also yields the per-alias note array, the
+// tool name, and the pre-mutation presence map that the `rewrite` log line needs.
+// `changed` mirrors the former non-nil []string return (nil == unchanged).
+type rewriteObjectResult struct {
+	changed bool
+	notes   []string
+	tool    string
+	present map[string]bool // per-cfg.Aliases presence, captured PRE-mutation
+}
+
+// rewriteLogFields builds the `rewrite` event payload from a rewrite decision
+// (P1.M4.T3.S1, PRD §15): req_id, tool (if present), notes (the array), and the
+// per-alias presence map. Pulled out so the handler reads as one log.log call and
+// the field set is testable in isolation. NEVER include header values here — the
+// rewrite event carries no headers, so Authorization can never appear (PRD §13).
+// If a future field adds header context, route it through redactHeaders first.
+func rewriteLogFields(dec rewriteDecision) map[string]any {
+	return map[string]any{
+		"req_id":  dec.reqID,   // float64|string|nil — json.Marshal renders nil as null
+		"tool":    dec.tool,    // "" renders as "" (PRD: "tool (if present)")
+		"notes":   dec.notes,   // []string -> JSON array
+		"present": dec.present, // map[string]bool -> {"alias":bool,...}
+	}
+}
+
+// forwardMode renders the streamed-vs-injected label for the debug `forward` log
+// line (PRD §15). "streamed" when no argument was rewritten (forward io.Copy'd
+// the body verbatim); "injected" when a tools/call argument was rewritten
+// (forward ran sse.Inject). Reflects the path decision (dec.streamThrough).
+func forwardMode(streamThrough bool) string {
+	if streamThrough {
+		return "streamed"
+	}
+	return "injected"
 }

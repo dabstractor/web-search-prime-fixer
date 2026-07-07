@@ -313,7 +313,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Proxy integration (proxy.go)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Wire Rewrite into the request path and SSE Inject into the response path inside the handler from P1.M1.T4, with full header handling, the redacting logger's request events, and timeout/robustness. This is PRD §20 step 4 and PRD §11/§13/§17. The P1.M1.T4.S2 passthrough core becomes the streamThrough=true branch.",
           "tasks": [
             {
@@ -395,14 +395,14 @@
               "type": "Task",
               "id": "P1.M4.T3",
               "title": "Logging integration (rewrite / upstream_error / debug forward)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Wire the redacting logger (P1.M1.T3) into the proxy handler for the per-request log events: rewrite, upstream_error, and (debug) forward. PRD §15.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T3.S1",
                   "title": "rewrite + upstream_error + debug forward log events",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T3.S1",
@@ -438,7 +438,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "Fake upstream + test harness (initialize SSE, session header, Accept assertion)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T2.S2",
