@@ -320,14 +320,14 @@
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Request-side handling — read body, decide rewrite, re-serialize",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Read the full request body, detect tools/call, apply Rewrite, track rewritten request ids, and choose between forwarding original bytes (passthrough) or re-serialized bytes (rewrite). PRD §11.1.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Body parse + tools/call detection + Rewrite wiring + reqID tracking",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T4.S2",
@@ -354,7 +354,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T2.S1",
                   "title": "Forward to upstream (headers, hop-by-hop strip, Accept fallback, ctx) + response header copy",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S1",

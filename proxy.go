@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"time"
@@ -80,24 +82,44 @@ func copyForwardHeaders(dst, src http.Header) {
 // EXTENDS forward() with a conditional SSE-injection response path.
 func newProxyHandler(cfg Config, log *logger, client *http.Client) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
-		// NewRequestWithContext(r.Context(), ..., r.Body) streams r.Body to
-		// upstream without buffering AND sets the context in one step (≡ the
-		// contract's outReq.WithContext(r.Context())). cfg.Upstream is the full
-		// absolute z.ai URL; the incoming path is NOT spliced in (PRD §9).
-		outReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, cfg.Upstream, r.Body)
+		// PRD §11.1 point 1: read the FULL request body (MCP requests are small
+		// JSON-RPC objects). This ends streaming on the REQUEST side; the RESPONSE
+		// side stays streamed (forward io.Copy / Inject).
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			log.log("error", "upstream_error", map[string]any{"err": err.Error()})
+			http.Error(rw, `{"error":"read body"}`, http.StatusBadRequest)
+			return
+		}
+		// Decide the rewrite (pure). dec.body is the original bytes when nothing
+		// changed (zero drift) or the re-serialized bytes when an alias was renamed.
+		dec := decideRewrite(body, cfg)
+
+		// bytes.NewReader lets net/http set ContentLength (and GetBody for safe
+		// retries) from the actual forwarded length — even after re-serialization
+		// changed the byte count. (Verified: Transport writes Content-Length from
+		// outReq.ContentLength, ignoring a stale copied header.)
+		outReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, cfg.Upstream, bytes.NewReader(dec.body))
 		if err != nil {
 			log.log("error", "upstream_error", map[string]any{"err": err.Error()})
 			http.Error(rw, `{"error":"bad upstream request"}`, http.StatusBadGateway)
 			return
 		}
 		copyForwardHeaders(outReq.Header, r.Header)
+		// The copied Content-Length reflects the ORIGINAL (pre-rewrite) length;
+		// after re-serialization it may be stale. Transport writes the correct
+		// length from outReq.ContentLength (set above via bytes.NewReader), so
+		// drop the stale copy.
+		outReq.Header.Del("Content-Length")
 		// Accept fallback (PRD §8): the text/event-stream token is REQUIRED or
 		// z.ai returns empty. ONLY default when the client omitted Accept; a
 		// client-provided Accept is passed through unmodified (PRD §11.2).
 		if outReq.Header.Get("Accept") == "" {
 			outReq.Header.Set("Accept", "application/json, text/event-stream")
 		}
-		forward(client, rw, outReq, log)
+		// dec.body is already set as outReq.Body; dec.rewrittenIDs + dec.warning
+		// are threaded for P1.M4.T2.S2 (response-side io.Copy-vs-Inject branch).
+		forward(client, rw, outReq, dec, log)
 	}
 }
 
@@ -105,11 +127,14 @@ func newProxyHandler(cfg Config, log *logger, client *http.Client) http.HandlerF
 // (PRD §11.3 passthrough path). It is the REUSABLE FORWARD CORE: copy status +
 // non-hop-by-hop response headers, io.Copy the body verbatim, flush for SSE.
 //
-// P1.M4.T2.S2 will EXTEND the body step: io.Copy (passthrough) UNLESS the
-// request was rewritten, in which case the body is fed through the SSE injector
-// keyed on reqID. The request has already been built by the caller (T4.S2
-// streams r.Body; M4 passes rewritten bytes), so forward is body-source agnostic.
-func forward(client *http.Client, rw http.ResponseWriter, outReq *http.Request, log *logger) {
+// dec carries the rewrite decision for this request: dec.body is already set as
+// outReq.Body by the caller (newProxyHandler); dec.streamThrough/rewrittenIDs/
+// warning select the RESPONSE path. P1.M4.T2.S2 EXTENDS the body step:
+// io.Copy (passthrough) when dec.streamThrough, otherwise feed the body through
+// the SSE injector (sse.go Inject) keyed on dec.rewrittenIDs with dec.warning.
+// Until then the body is streamed through unchanged (the rewrite already shaped
+// the REQUEST); dec is received but not yet used here.
+func forward(client *http.Client, rw http.ResponseWriter, outReq *http.Request, dec rewriteDecision, log *logger) {
 	resp, err := client.Do(outReq)
 	if err != nil {
 		log.log("error", "upstream_error", map[string]any{"err": err.Error()})
@@ -138,4 +163,139 @@ func forward(client *http.Client, rw http.ResponseWriter, outReq *http.Request, 
 	if f, ok := rw.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// rewriteDecision is the outcome of inspecting a request body for the alias
+// rewrite (PRD §11.1). It is produced by decideRewrite and consumed by the
+// forward path (P1.M4.T2.S1 — the body to POST) and the response path
+// (P1.M4.T2.S2 — the rewritten ids + warning that select SSE injection).
+type rewriteDecision struct {
+	// body is the request body to forward upstream: the ORIGINAL input bytes when
+	// streamThrough is true (no rewrite — zero formatting drift, PRD §11.1 point 4),
+	// otherwise the re-serialized bytes carrying the renamed args.
+	body []byte
+	// streamThrough is true when NO tools/call argument was rewritten. When true,
+	// body is the original bytes verbatim and the response is io.Copy'd unchanged
+	// (P1.M4.T2.S2). When false, the response is run through the SSE injector keyed
+	// on rewrittenIDs.
+	streamThrough bool
+	// rewrittenIDs is the set of JSON-RPC request ids whose tools/call arguments
+	// were rewritten. Keys are the values encoding/json produced when decoding the
+	// request id into any: float64 for numeric ids, string for string ids. This is
+	// exactly what Inject (sse.go) finds when it decodes the RESPONSE id the same
+	// way (see "id contract" on decideRewrite). Empty/nil when streamThrough.
+	rewrittenIDs map[any]bool
+	// warning is the formatted single-line warning (warningText, sse.go) to prepend
+	// into each rewritten tools/call RESULT. Empty when streamThrough.
+	warning string
+}
+
+// decideRewrite inspects a JSON-RPC request body and, for every tools/call whose
+// params.arguments contains a configured alias, applies the alias->target rename
+// in place via Rewrite (rewrite.go). It returns the bytes to forward upstream and
+// the per-request state the response path needs (rewritten ids + warning)
+// (PRD §11.1). decideRewrite is PURE (no I/O) and is unit-tested in isolation.
+//
+// RULES:
+//   - ORIGINAL-BYTES PASSTHROUGH (PRD §11.1 point 4): when NO object changed, the
+//     returned body is the ORIGINAL input bytes — no re-serialization — so a request
+//     that needs no fixup is forwarded byte-for-byte and cannot drift in formatting
+//     (key order, whitespace, HTML-escaping). Only a request that was actually
+//     rewritten is re-serialized.
+//   - ARRAY HANDLING (PRD §11.1 point 2): MCP does not use batches, but if the body
+//     decodes to a JSON ARRAY, each element is inspected independently and, if any
+//     element changed, the whole body is re-serialized as an array. A non-array,
+//     non-object body (or unparseable JSON) is passed through UNCHANGED rather than
+//     rejected — the proxy never blocks a request on a parse quirk.
+//   - ID TRACKING: a rewritten object's JSON-RPC id is added to rewrittenIDs using
+//     the decoded value directly (float64 for numbers — see the id contract below).
+//     This is the correlation key the SSE injector matches against in the response
+//     (sse.go Inject, P1.M3.T3.S2).
+//
+// id contract: numeric JSON-RPC ids decode to float64 in any (id:2 -> float64(2));
+// rewrittenIDs is therefore keyed by float64(2), which is exactly what Inject finds
+// when it decodes the response id the same way. String ids decode to string and
+// match identically. Never build rewrittenIDs from an int key —
+// map[any]bool{int(2):true} would NOT match float64(2) (verified).
+func decideRewrite(body []byte, cfg Config) rewriteDecision {
+	var parsed any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		// Not valid JSON -> forward unchanged (never reject on a parse quirk).
+		return rewriteDecision{body: body, streamThrough: true}
+	}
+
+	var rewrittenIDs map[any]bool
+	var notes []string
+	// addID records a rewritten object's id + notes. The id is the DECODED value
+	// (float64 for numbers) — the key Inject matches on the response side.
+	addID := func(id any, n []string) {
+		if rewrittenIDs == nil {
+			rewrittenIDs = make(map[any]bool)
+		}
+		rewrittenIDs[id] = true
+		notes = append(notes, n...)
+	}
+
+	switch v := parsed.(type) {
+	case map[string]any:
+		if n := rewriteObject(v, cfg); n != nil {
+			addID(v["id"], n)
+		}
+	case []any:
+		// Defensive JSON-RPC batch (MCP does not use batches): process each element.
+		for _, elem := range v {
+			if obj, ok := elem.(map[string]any); ok {
+				if n := rewriteObject(obj, cfg); n != nil {
+					addID(obj["id"], n)
+				}
+			}
+		}
+	default:
+		// Valid JSON but a scalar (number/string/null/bool) -> pass through.
+		return rewriteDecision{body: body, streamThrough: true}
+	}
+
+	if len(rewrittenIDs) == 0 {
+		// Nothing changed -> forward ORIGINAL bytes (no re-serialization).
+		return rewriteDecision{body: body, streamThrough: true}
+	}
+
+	// Something changed -> re-serialize the (possibly array) body. json.Marshal
+	// sorts keys and HTML-escapes <>&, both semantically harmless for JSON-RPC
+	// (z.ai parses the value, not the bytes); the original-bytes path above is
+	// what guards formatting fidelity for the common unchanged case.
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		// Cannot happen for a value we just decoded; defensive: pass through.
+		return rewriteDecision{body: body, streamThrough: true}
+	}
+	return rewriteDecision{
+		body:          out,
+		streamThrough: false,
+		rewrittenIDs:  rewrittenIDs,
+		warning:       warningText(notes),
+	}
+}
+
+// rewriteObject applies the alias rewrite to a single JSON-RPC object IN PLACE.
+// It returns the RewriteResult.Notes (nil when nothing changed) so the caller can
+// collect the object's id and join notes into the warning. A non-tools/call
+// method, or a tools/call with absent/non-object params.arguments, is left
+// untouched (PRD §11.1 point 3; §3 — only configured aliases are ever moved).
+func rewriteObject(obj map[string]any, cfg Config) []string {
+	if obj["method"] != "tools/call" {
+		return nil
+	}
+	params, ok := obj["params"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	args, ok := params["arguments"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	if res := Rewrite(args, cfg.Aliases, cfg.TargetParam); res.Changed {
+		return res.Notes
+	}
+	return nil
 }
