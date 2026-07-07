@@ -270,3 +270,221 @@ func TestWarningText_Table(t *testing.T) {
 		})
 	}
 }
+
+// injectWarning is a fixed warning string for Inject tests (decoupled from
+// warningText, which is exercised by TestWarningText_*). PRD §19.2.
+const injectWarning = `[web-search-prime-fixer] "query" is not a valid parameter; renamed to "search_query". Use "search_query" in future calls.`
+
+// injectAll runs Inject over the SSE stream in raw, with the given rewrittenIDs and
+// warning, and returns the re-emitted bytes. Helper for the §19.2 cases.
+func injectAll(t *testing.T, raw string, rewrittenIDs map[any]bool, warning string) string {
+	t.Helper()
+	var out strings.Builder
+	if err := Inject(&out, strings.NewReader(raw), rewrittenIDs, warning); err != nil {
+		t.Fatalf("Inject err=%v, want nil", err)
+	}
+	return out.String()
+}
+
+// firstEventData decodes the first event of an SSE stream and returns it (for
+// asserting on the injected/unchanged Data).
+func firstEventData(t *testing.T, raw string) Event {
+	t.Helper()
+	ev, err := NewSSEReader(strings.NewReader(raw)).Next()
+	if err != nil {
+		t.Fatalf("re-decode first event err=%v, want nil", err)
+	}
+	return ev
+}
+
+// TestSSE_Inject_ToolCallPrependsWarning: inject into testdata/tools_call.sse with
+// id 2 in the set -> content[0] is the warning; content[1].text is the ORIGINAL
+// stringified array (byte-identical) and still valid JSON; isError untouched
+// (PRD §19.2, §12.2, §3/FR-3).
+func TestSSE_Inject_ToolCallPrependsWarning(t *testing.T) {
+	raw, err := os.ReadFile("testdata/tools_call.sse")
+	if err != nil {
+		t.Skipf("testdata fixture missing: %v", err)
+	}
+	// Capture the ORIGINAL content[0].text (the stringified array) BEFORE inject.
+	origEv := firstEventData(t, string(raw))
+	origResult := origEv.Data // full JSON-RPC object string
+	var origObj map[string]any
+	json.Unmarshal([]byte(origResult), &origObj)
+	origText := origObj["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+
+	out := injectAll(t, string(raw), map[any]bool{float64(2): true}, injectWarning)
+	ev := firstEventData(t, out)
+
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(ev.Data), &obj); err != nil {
+		t.Fatalf("injected Data is not valid JSON: %v\n%s", err, ev.Data)
+	}
+	if obj["jsonrpc"] != "2.0" || obj["id"] != float64(2) {
+		t.Errorf("envelope changed: jsonrpc=%v id=%v", obj["jsonrpc"], obj["id"])
+	}
+	result := obj["result"].(map[string]any)
+	if isErr, _ := result["isError"].(bool); isErr {
+		t.Errorf("isError=%v, want false (FR-3: never set isError)", isErr)
+	}
+	content := result["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("len(content)=%d, want 2 (warning + original)", len(content))
+	}
+	// content[0] is the warning block.
+	c0 := content[0].(map[string]any)
+	if c0["type"] != "text" || c0["text"] != injectWarning {
+		t.Errorf("content[0]=%v, want {type:text text:%q}", c0, injectWarning)
+	}
+	// content[1].text is the ORIGINAL stringified array, byte-identical + valid JSON.
+	c1text := content[1].(map[string]any)["text"].(string)
+	if c1text != origText {
+		t.Errorf("content[1].text changed:\n got %q\nwant %q", c1text, origText)
+	}
+	if !json.Valid([]byte(c1text)) {
+		t.Errorf("content[1].text is not valid JSON: %q", c1text)
+	}
+}
+
+// TestSSE_Inject_IdNotInSetPassthrough: a tools/call result whose id is NOT in the
+// set is re-emitted with Data UNCHANGED (no warning) (PRD §19.2).
+func TestSSE_Inject_IdNotInSetPassthrough(t *testing.T) {
+	raw, err := os.ReadFile("testdata/tools_call.sse")
+	if err != nil {
+		t.Skipf("testdata fixture missing: %v", err)
+	}
+	wantData := firstEventData(t, string(raw)).Data
+	out := injectAll(t, string(raw), map[any]bool{float64(99): true}, injectWarning)
+	gotData := firstEventData(t, out).Data
+	if gotData != wantData {
+		t.Errorf("id-not-in-set Data changed:\n got %q\nwant %q", gotData, wantData)
+	}
+}
+
+// TestSSE_Inject_InitializePassthrough: a non-tools/call result (initialize; id 1)
+// is re-emitted with Data UNCHANGED (PRD §19.2).
+func TestSSE_Inject_InitializePassthrough(t *testing.T) {
+	raw, err := os.ReadFile("testdata/initialize.sse")
+	if err != nil {
+		t.Skipf("testdata fixture missing: %v", err)
+	}
+	out := injectAll(t, string(raw), map[any]bool{float64(2): true}, injectWarning)
+	ev := firstEventData(t, out)
+	if ev.Data != initJSON {
+		t.Errorf("initialize Data changed:\n got %q\nwant %q", ev.Data, initJSON)
+	}
+}
+
+// TestSSE_Inject_ErrorResultPassthrough: a JSON-RPC error envelope (id in set) and
+// an MCP isError:true result are re-emitted UNCHANGED (PRD §19.2 "error result (no
+// content array) -> verbatim"; §12.2).
+func TestSSE_Inject_ErrorResultPassthrough(t *testing.T) {
+	cases := []struct {
+		name, sse string
+	}{
+		{
+			// JSON-RPC error response: has "error", no "result" (hence no content).
+			"jsonrpc_error_envelope",
+			"data:{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32603,\"message\":\"boom\"}}\n\n",
+		},
+		{
+			// MCP tools/call error: result.isError=true (still has content) -> unchanged.
+			"mcp_isError_true",
+			"data:{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"err\"}]}}\n\n",
+		},
+		{
+			// result present but no content array -> unchanged.
+			"result_no_content",
+			"data:{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"isError\":false}}\n\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wantData := firstEventData(t, tc.sse).Data
+			out := injectAll(t, tc.sse, map[any]bool{float64(2): true}, injectWarning)
+			gotData := firstEventData(t, out).Data
+			if gotData != wantData {
+				t.Errorf("error-result Data changed:\n got %q\nwant %q", gotData, wantData)
+			}
+		})
+	}
+}
+
+// TestSSE_Inject_MultilineRoundTrip: a multi-data:-line event (8 lines) is parsed,
+// injected, and re-emitted with content preserved. The joined Data parses to valid
+// JSON; content[0] is the warning, content[1].text is valid JSON (PRD §19.2, §8.10).
+func TestSSE_Inject_MultilineRoundTrip(t *testing.T) {
+	raw, err := os.ReadFile("testdata/tools_call_multiline.sse")
+	if err != nil {
+		t.Skipf("testdata fixture missing: %v", err)
+	}
+	out := injectAll(t, string(raw), map[any]bool{float64(2): true}, injectWarning)
+	ev := firstEventData(t, out)
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(ev.Data), &obj); err != nil {
+		t.Fatalf("multiline injected Data not valid JSON: %v\n%s", err, ev.Data)
+	}
+	content := obj["result"].(map[string]any)["content"].([]any)
+	if c0 := content[0].(map[string]any); c0["type"] != "text" || c0["text"] != injectWarning {
+		t.Errorf("multiline content[0]=%v, want the warning block", c0)
+	}
+	c1text := content[1].(map[string]any)["text"].(string)
+	if !json.Valid([]byte(c1text)) {
+		t.Errorf("multiline content[1].text not valid JSON: %q", c1text)
+	}
+}
+
+// TestSSE_EmitEvent_Framing: emitEvent produces id:/event:/data: framing per PRD
+// §8.10 — id: iff ID!=""; event: iff a non-default type; internal "\n" in Data
+// split into multiple data: lines; terminated by a blank line. Round-trips through
+// NewSSEReader (PRD §19.2 multi-line round-trip).
+func TestSSE_EmitEvent_Framing(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   Event
+		want string
+	}{
+		{
+			// message default + multi-line data -> no event: line; 2 data: lines.
+			"message_multiline_data",
+			Event{Type: "message", Data: "a\nb"},
+			"data:a\ndata:b\n\n",
+		},
+		{
+			// id present, message default -> id: line, no event: line.
+			"id_and_message",
+			Event{ID: "1", Type: "message", Data: "x"},
+			"id:1\ndata:x\n\n",
+		},
+		{
+			// custom event type -> event: line emitted.
+			"custom_event_type",
+			Event{Type: "ping", Data: "x"},
+			"event:ping\ndata:x\n\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			if err := emitEvent(&b, tc.ev); err != nil {
+				t.Fatalf("emitEvent err=%v", err)
+			}
+			if got := b.String(); got != tc.want {
+				t.Errorf("emitEvent framing:\n got %q\nwant %q", got, tc.want)
+			}
+			// Round-trip: re-decoding the emitted bytes yields the original Event
+			// (Data joined back with "\n", Type defaulted to "message" if absent).
+			rt, err := NewSSEReader(strings.NewReader(b.String())).Next()
+			if err != nil {
+				t.Fatalf("round-trip re-decode err=%v", err)
+			}
+			wantRT := tc.ev
+			if wantRT.Type == "" {
+				wantRT.Type = "message"
+			}
+			if !reflect.DeepEqual(rt, wantRT) {
+				t.Errorf("round-trip mismatch:\n got %+v\nwant %+v", rt, wantRT)
+			}
+		})
+	}
+}

@@ -208,7 +208,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "SSE warning injection (sse.go)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "SSE event reader (WHATWG framing) and the warning injector that prepends a text content block to a rewritten tools/call result, plus golden wire-format fixtures. PRD §12, §19.2, §19.4. This is PRD §20 step 3. Depends on P1.M2 (RewriteResult.Notes feeds warningText).",
           "tasks": [
             {
@@ -266,7 +266,7 @@
               "type": "Task",
               "id": "P1.M3.T3",
               "title": "Warning injector + warningText",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Builds the human-readable warning line from RewriteResult.Notes, and the injector that, for a rewritten tools/call result event, prepends a {type:text,text:warning} content block and re-emits the event with correct SSE framing.",
               "subtasks": [
                 {
@@ -289,7 +289,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T3.S2",
                   "title": "SSE inject — prepend warning into tools/call result, re-emit with framing",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S1",
@@ -320,14 +320,14 @@
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Request-side handling — read body, decide rewrite, re-serialize",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Read the full request body, detect tools/call, apply Rewrite, track rewritten request ids, and choose between forwarding original bytes (passthrough) or re-serialized bytes (rewrite). PRD §11.1.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Body parse + tools/call detection + Rewrite wiring + reqID tracking",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T4.S2",

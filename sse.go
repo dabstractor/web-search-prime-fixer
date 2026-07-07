@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
 	"strings"
 )
@@ -157,4 +158,126 @@ func warningText(notes []string) string {
 		suffix = ` Use only "search_query" to avoid this notice.`
 	}
 	return "[web-search-prime-fixer] " + strings.Join(notes, "; ") + "." + suffix
+}
+
+// Inject reads a Server-Sent Events stream from body (an upstream response body)
+// and writes a transformed stream to w. For each event whose JSON-RPC id is in
+// rewrittenIDs and whose result.content is an array, it PREPENDS one content block
+// {"type":"text","text":warning} at index 0, re-serializes, and re-emits the event
+// with its original Event.ID and Event.Type, splitting any internal newlines in the
+// data back into multiple "data:" lines (WHATWG round-trip, PRD §8.10/§12.2).
+//
+// RULES (PRD §12.2 + §3/FR-3):
+//   - ID CORRELATION: the matching id is the JSON-RPC "id" INSIDE the event's Data
+//     (obj["id"]), NOT the SSE Event.ID (the "id:" field). An event whose id is
+//     absent or not in rewrittenIDs is re-emitted UNCHANGED.
+//   - PREPEND-ONLY: the original result.content elements are preserved in order
+//     (appended after the warning); isError and every other field are untouched.
+//   - isError UNTOUCHED: the proxy NEVER sets isError:true (FR-3). An MCP
+//     isError:true result, a JSON-RPC "error" envelope, or any result without a
+//     content array is re-emitted UNCHANGED (nothing to prepend to / an error).
+//   - PASSTHROUGH-ON-NO-CONTENT: if Data is not a JSON object, has no result, or
+//     result.content is not an array, the event is re-emitted UNCHANGED.
+//
+// Inject returns nil at clean EOF, the reader's non-EOF error, or a write error.
+// It does not flush w (the caller owns http.Flusher — see P1.M4.T2.S2). A nil or
+// empty rewrittenIDs re-emits every event unchanged (defensive; the proxy uses
+// io.Copy instead in that case). warning is the formatted line from warningText
+// (P1.M3.T3.S1); Inject does not call warningText itself.
+func Inject(w io.Writer, body io.Reader, rewrittenIDs map[any]bool, warning string) error {
+	rd := NewSSEReader(body)
+	for {
+		ev, err := rd.Next()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		ev.Data = injectData(ev.Data, rewrittenIDs, warning)
+		if err := emitEvent(w, ev); err != nil {
+			return err
+		}
+	}
+}
+
+// injectData returns data with the warning prepended into result.content if data is
+// a rewritten tools/call result; otherwise it returns data UNCHANGED (PRD §12.2
+// guards 1–7). It never touches isError and never fails (a parse/re-serialize
+// error means "not a result we can inject into" → return the original data).
+func injectData(data string, rewrittenIDs map[any]bool, warning string) string {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(data), &obj); err != nil {
+		return data // 1. not JSON -> unchanged
+	}
+	if _, isJSONRPCError := obj["error"]; isJSONRPCError {
+		return data // 2. JSON-RPC error envelope (no result) -> unchanged
+	}
+	id, ok := obj["id"]
+	if !ok || !rewrittenIDs[id] {
+		return data // 3. id absent or not rewritten -> unchanged
+	}
+	result, ok := obj["result"].(map[string]any)
+	if !ok {
+		return data // 4. no result object -> unchanged
+	}
+	if isErr, ok := result["isError"].(bool); ok && isErr {
+		return data // 5. MCP isError:true result -> unchanged
+	}
+	content, ok := result["content"].([]any)
+	if !ok {
+		return data // 6. no content array -> unchanged
+	}
+	// 7. PREPEND the warning; original content elements are preserved in order.
+	result["content"] = append(
+		[]any{map[string]string{"type": "text", "text": warning}},
+		content...,
+	)
+	out, err := marshalJSON(obj)
+	if err != nil {
+		return data // re-serialization failed -> unchanged (defensive; shouldn't happen)
+	}
+	return out
+}
+
+// emitEvent writes one SSE event to w with WHATWG framing (PRD §8.10): an "id:"
+// line iff Event.ID != "", an "event:" line iff Event.Type is a non-default type
+// (the "message" default is omitted on the wire, matching z.ai's tools/call form),
+// one "data:<line>" per "\n"-separated piece of Event.Data (the reverse of the
+// reader's Join), and a terminating blank line.
+func emitEvent(w io.Writer, ev Event) error {
+	var b strings.Builder
+	if ev.ID != "" {
+		b.WriteString("id:")
+		b.WriteString(ev.ID)
+		b.WriteByte('\n')
+	}
+	if ev.Type != "" && ev.Type != "message" {
+		b.WriteString("event:")
+		b.WriteString(ev.Type)
+		b.WriteByte('\n')
+	}
+	for _, line := range strings.Split(ev.Data, "\n") {
+		b.WriteString("data:")
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n') // blank line terminates the event
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+// marshalJSON encodes v as compact JSON WITHOUT HTML-escaping (<, >, & are
+// preserved), so re-serializing a z.ai result does not alter text that may contain
+// HTML from search results. json.Marshal would escape those to \u003c/\u003e/\u0026
+// (verified). The trailing "\n" that Encoder.Encode appends is trimmed (valid JSON
+// never ends in a bare "\n").
+func marshalJSON(v any) (string, error) {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
 }
