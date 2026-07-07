@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -123,23 +124,53 @@ func newProxyHandler(cfg Config, log *logger, client *http.Client) http.HandlerF
 	}
 }
 
+// flushWriter writes to w and, when f is non-nil, flushes after each successful
+// Write. forward wraps the response writer with it for SSE responses so streamed
+// events are not buffered (PRD §11.3). Because sse.emitEvent writes one whole event
+// per io.WriteString, one Write here == one emitted event == one Flush. Flush adds no
+// bytes, so wrapping the io.Copy passthrough path is byte-safe
+// (TestForward_PassthroughByteEqual). f is nil for non-SSE or non-Flusher writers
+// -> pass-through.
+type flushWriter struct {
+	w io.Writer
+	f http.Flusher
+}
+
+func (fw flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if err == nil && fw.f != nil {
+		fw.f.Flush()
+	}
+	return n, err
+}
+
 // forward sends outReq via client and streams the upstream response to rw
 // (PRD §11.2/§11.3). It is the REUSABLE FORWARD CORE: copy status + non-hop-by-hop
-// response headers, stream the body, flush for SSE.
+// response headers, write the body, flush for SSE.
 //
-// NON-2xx (P1.M4.T2.S1, PRD §15): when the upstream returns a non-2xx status, an
-// upstream_error line {status, req_id} is logged at warn — but the response is
-// STILL copied through verbatim (status + headers + body). The proxy NEVER
-// synthesizes a 502 for an upstream HTTP error status; synthesis happens only on
-// a transport failure (client.Do error) below.
+// RESPONSE BODY (PRD §11.3, P1.M4.T2.S2): after the status + headers are written,
+// the body step branches on the rewrite decision:
+//   - dec.streamThrough == true  -> io.Copy(rw, resp.Body) VERBATIM (zero parse, zero
+//     buffering — PRD §6; the common case). No warning is injected.
+//   - dec.streamThrough == false -> Inject(rw, resp.Body, dec.rewrittenIDs,
+//     dec.warning) (sse.go, P1.M3.T3.S2): the upstream SSE body is decoded event by
+//     event, and for each event whose JSON-RPC id is in dec.rewrittenIDs one text
+//     warning block is prepended into result.content; every other event is re-emitted
+//     unchanged. isError is never touched (FR-3).
 //
-// dec carries the rewrite decision. dec.body is already set as outReq.Body by the
-// caller (newProxyHandler); dec.reqID is used for the upstream_error log here;
-// dec.streamThrough/rewrittenIDs/warning select the RESPONSE body path.
-// P1.M4.T2.S2 EXTENDS the body step: io.Copy (passthrough) when
-// dec.streamThrough, otherwise feed the body through the SSE injector (sse.go
-// Inject) keyed on dec.rewrittenIDs with dec.warning. Until then the body is
-// streamed through unchanged.
+// SSE FLUSH (PRD §11.3 "Flush after writing when the content type is SSE"): when
+// the upstream Content-Type contains "text/event-stream", the writer is wrapped in
+// a flushWriter so each Write flushes immediately — one Flush per emitted event on
+// the Inject path, one per read chunk on the io.Copy path — so streamed events are
+// not buffered. A trailing http.Flusher.Flush() covers any residual buffered bytes.
+// On the rewrite path the upstream's Content-Length is dropped from the copied
+// headers because Inject re-serializes the body and changes its byte count
+// (mirrors the request-side Content-Length handling in newProxyHandler).
+//
+// NON-2xx (P1.M4.T2.S1, PRD §15): a non-2xx upstream status is logged at warn as
+// upstream_error {status, req_id} but STILL copied through (status + headers + body);
+// the proxy never synthesizes a 502 for an HTTP error status. dec.reqID names the
+// request in that log. dec.body was set as outReq.Body by the caller (newProxyHandler).
 func forward(client *http.Client, rw http.ResponseWriter, outReq *http.Request, dec rewriteDecision, log *logger) {
 	resp, err := client.Do(outReq)
 	if err != nil {
@@ -160,8 +191,14 @@ func forward(client *http.Client, rw http.ResponseWriter, outReq *http.Request, 
 	// Copy non-hop-by-hop response headers BEFORE WriteHeader (WriteHeader locks
 	// the header map). Content-Type, Mcp-Session-Id, Cache-Control, Vary, X-Log-Id
 	// pass through; Transfer-Encoding/Connection etc. are stripped (hop-by-hop).
+	// On the rewrite path (dec.streamThrough == false) the body is re-serialized by
+	// Inject, so its byte count changes and the upstream's Content-Length would be
+	// stale -> drop it (mirrors the request-side handling in newProxyHandler).
 	for k, vs := range resp.Header {
 		if isHopByHop(k) {
+			continue
+		}
+		if !dec.streamThrough && http.CanonicalHeaderKey(k) == "Content-Length" {
 			continue
 		}
 		for _, v := range vs {
@@ -169,12 +206,30 @@ func forward(client *http.Client, rw http.ResponseWriter, outReq *http.Request, 
 		}
 	}
 	rw.WriteHeader(resp.StatusCode)
-	// io.Copy streams the body without whole-body buffering (PRD §11.3/§6). A
-	// copy error here (client disconnect mid-stream) is logged at warn, not fatal.
-	if _, err := io.Copy(rw, resp.Body); err != nil {
-		log.log("warn", "upstream_error", map[string]any{"err": err.Error()})
+
+	// P1.M4.T2.S2: choose the writer. Wrap with flushWriter for SSE so each Write
+	// flushes (per emitted event on Inject; per read chunk on io.Copy). Flush adds
+	// no bytes, so the passthrough path stays byte-for-byte identical (PRD §11.3/§6).
+	var w io.Writer = rw
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		if f, ok := rw.(http.Flusher); ok {
+			w = flushWriter{w: rw, f: f}
+		}
 	}
-	// Flush so SSE events reach the client immediately (external_deps.md §2).
+	if dec.streamThrough {
+		// Passthrough: stream the upstream body unchanged, no warning (PRD §11.3/§6).
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			log.log("warn", "upstream_error", map[string]any{"err": err.Error()})
+		}
+	} else {
+		// Rewrite path: feed the upstream body through the SSE injector keyed on
+		// the rewritten request ids; matching tools/call results get the warning
+		// prepended (PRD §11.3/§12). Non-matching events pass through unchanged.
+		if err := Inject(w, resp.Body, dec.rewrittenIDs, dec.warning); err != nil {
+			log.log("warn", "upstream_error", map[string]any{"err": err.Error()})
+		}
+	}
+	// Final flush for any residual buffered bytes (non-SSE / non-Flusher writers).
 	if f, ok := rw.(http.Flusher); ok {
 		f.Flush()
 	}

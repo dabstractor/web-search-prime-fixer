@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -550,3 +551,181 @@ func TestDecideRewrite_ReqID(t *testing.T) {
 		})
 	}
 }
+
+// toolsCallSSE loads the canned tools/call SSE result (id:2) the e2e tests stream.
+// (P1.M4.T2.S2; mirrors sse_test.go's fixture read, but proxy_test.go owns its own.)
+func toolsCallSSE(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("testdata/tools_call.sse")
+	if err != nil {
+		t.Skipf("testdata/tools_call.sse missing: %v", err)
+	}
+	return string(b)
+}
+
+// (9) PASSTHROUGH byte-equal: a canonical-param tools/call (no alias) streams the
+// upstream SSE body back BYTE-FOR-BYTE — no injected warning block (PRD §11.3/§19.3
+// case 2; P1.M4.T2.S2 MOCKING "passthrough case asserts client body is BYTE-EQUAL").
+func TestForward_PassthroughByteEqual(t *testing.T) {
+	want := toolsCallSSE(t) // upstream payload the client must receive verbatim
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream;charset=UTF-8")
+		w.Header().Set("Mcp-Session-Id", testSID)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, want)
+	}))
+	defer up.Close()
+	proxy := newTestProxy(up.URL) // discard logger is fine — success path logs nothing
+	defer proxy.Close()
+
+	// Canonical param -> decideRewrite streamThrough=true -> io.Copy verbatim.
+	resp, err := http.Post(proxy.URL, "application/json",
+		strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call",`+
+			`"params":{"arguments":{"search_query":"lunar rover"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != want {
+		t.Errorf("passthrough body not byte-equal to upstream (no block should be added):\n got %q\nwant %q", got, want)
+	}
+}
+
+// (10) REWRITE + warning first: an aliased tools/call ({"query":...}, id:2) ->
+// upstream RECEIVES search_query; client SSE event has the warning block at
+// content[0] and the ORIGINAL content at content[1], isError==false (PRD §11.3/§3/
+// FR-3/§19.3 case 1; P1.M4.T2.S2 MOCKING "rewrite case asserts warning block first").
+func TestForward_RewriteWarningFirst(t *testing.T) {
+	upPayload := toolsCallSSE(t) // id:2, content[0].text = stringified array
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+
+		var obj map[string]any
+		_ = json.Unmarshal(body, &obj)
+		args, _ := obj["params"].(map[string]any)["arguments"].(map[string]any)
+		if _, ok := args["query"]; ok {
+			t.Errorf("upstream received alias 'query' (should be renamed): %#v", args)
+		}
+		if args["search_query"] == nil {
+			t.Errorf("upstream did NOT receive 'search_query': %#v", args)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream;charset=UTF-8")
+		w.Header().Set("Mcp-Session-Id", testSID)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, upPayload)
+	}))
+	defer up.Close()
+	proxy := newTestProxy(up.URL)
+	defer proxy.Close()
+
+	// Alias "query" -> decideRewrite renames to search_query, rewrittenIDs={float64(2):true}.
+	resp, err := http.Post(proxy.URL, "application/json",
+		strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call",`+
+			`"params":{"arguments":{"query":"lunar rover"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	// Decode the (single) SSE event the client received and assert on the JSON-RPC object.
+	ev, err := NewSSEReader(bytes.NewReader(body)).Next()
+	if err != nil {
+		t.Fatalf("client response is not a decodable SSE event: %v\n%s", err, body)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(ev.Data), &obj); err != nil {
+		t.Fatalf("client event Data is not valid JSON: %v\n%s", err, ev.Data)
+	}
+	if obj["id"] != float64(2) {
+		t.Errorf("event id = %v, want float64(2)", obj["id"])
+	}
+	result := obj["result"].(map[string]any)
+	if isErr, _ := result["isError"].(bool); isErr {
+		t.Errorf("isError = true, want false (FR-3: never set isError)")
+	}
+	content := result["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("len(content) = %d, want 2 (warning + original)", len(content))
+	}
+	// content[0] is the injected warning block.
+	c0 := content[0].(map[string]any)
+	if c0["type"] != "text" {
+		t.Errorf("content[0].type = %v, want text", c0["type"])
+	}
+	warn, _ := c0["text"].(string)
+	if !strings.HasPrefix(warn, "[web-search-prime-fixer]") {
+		t.Errorf("content[0].text = %q, want it to start with the warning marker", warn)
+	}
+	// content[1].text is the ORIGINAL stringified array (the fixture's content[0].text).
+	origContent := jsonToContent0Text(t, upPayload)
+	c1text := content[1].(map[string]any)["text"].(string)
+	if c1text != origContent {
+		t.Errorf("content[1].text changed:\n got %q\nwant %q", c1text, origContent)
+	}
+}
+
+// jsonToContent0Text decodes an SSE payload's first event and returns
+// result.content[0].text (the original stringified array) so the rewrite test can
+// compare pre- vs post-inject.
+func jsonToContent0Text(t *testing.T, sse string) string {
+	t.Helper()
+	ev, err := NewSSEReader(strings.NewReader(sse)).Next()
+	if err != nil {
+		t.Fatalf("decode upstream payload: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(ev.Data), &obj); err != nil {
+		t.Fatalf("upstream payload not JSON: %v", err)
+	}
+	return obj["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+}
+
+// (11) flushWriter flushes once per Write and not on error; f==nil is a pass-through
+// (P1.M4.T2.S2; pins "Flush after each emitted event" since emitEvent does one Write
+// per event).
+func TestFlushWriter_FlushesPerWrite(t *testing.T) {
+	// recordingFlusher counts Flush() calls.
+	var flushes int
+	rc := &recordingFlusher{&flushes}
+	fw := flushWriter{w: bytes.NewBuffer(nil), f: rc}
+	if _, err := fw.Write([]byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte("b")); err != nil {
+		t.Fatal(err)
+	}
+	if flushes != 2 {
+		t.Errorf("flushes = %d, want 2 (one per Write)", flushes)
+	}
+
+	// f == nil -> pass-through, no Flush.
+	buf := bytes.NewBuffer(nil)
+	fwNil := flushWriter{w: buf, f: nil}
+	if _, err := fwNil.Write([]byte("c")); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != "c" {
+		t.Errorf("nil-flusher pass-through wrote %q, want c", buf.String())
+	}
+
+	// erroringWriter -> Write errors, Flush must NOT be called.
+	before := flushes
+	fwErr := flushWriter{w: erroringWriter{}, f: rc}
+	if _, err := fwErr.Write([]byte("x")); err == nil {
+		t.Error("erroringWriter Write returned nil error")
+	}
+	if flushes != before {
+		t.Errorf("Flush called after a write error (flushes %d -> %d)", before, flushes)
+	}
+}
+
+type recordingFlusher struct{ n *int }
+
+func (r *recordingFlusher) Flush() { *r.n++ }
+
+type erroringWriter struct{}
+
+func (erroringWriter) Write(p []byte) (int, error) { return 0, io.ErrShortWrite }
