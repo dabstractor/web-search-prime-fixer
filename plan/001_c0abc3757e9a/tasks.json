@@ -155,21 +155,21 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "The rewrite rule (rewrite.go)",
-          "status": "Planned",
+          "status": "Ready",
           "description": "A pure, table-tested function that renames configured aliases to TargetParam ('search_query') in a tools/call arguments map. No I/O, no external calls — fully unit-testable. PRD §10, §19.1. This is PRD §20 step 2.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Rewrite function + algorithm + table tests",
-              "status": "Planned",
+              "status": "Ready",
               "description": "RewriteResult type and the Rewrite(args, aliases, target) pure function implementing the PRD §10 algorithm, with the full section-10 example table green.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "RewriteResult + Rewrite algorithm (core table rows)",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -187,7 +187,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Rewrite edge cases + tests (de-dup, ordering, non-string values, nil/empty)",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -241,14 +241,14 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "SSE event reader/parser",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Decode an SSE byte stream into Event structs per WHATWG/RFC 8895 framing. Handles comments, field:value space-stripping, multi-line data concatenation, blank-line dispatch, and EOF final-event flush.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "SSE Event type + reader (WHATWG framing, unbounded lines, EOF flush)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S1"
