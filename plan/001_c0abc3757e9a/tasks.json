@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Foundation — module, config, logging, bootstrap",
-          "status": "Researching",
+          "status": "Complete",
           "description": "A binary that boots, loads config (runs with no config file via built-in defaults), emits structured redacted JSON logs to stderr, serves GET /healthz, and transparently forwards all other traffic to the z.ai upstream with streaming responses. This is PRD §20 step 1: de-risk the transport contract (PRD §8) end-to-end before building rewrite/SSE logic. The forward-and-stream core built here is REUSED as the passthrough branch by P1.M4 (no rework).",
           "tasks": [
             {
@@ -107,7 +107,7 @@
               "type": "Task",
               "id": "P1.M1.T4",
               "title": "Bootstrap — server, /healthz, passthrough, graceful shutdown",
-              "status": "Researching",
+              "status": "Complete",
               "description": "main() loads config, builds the logger, registers /healthz and a minimal transparent passthrough handler that streams responses, and shuts down gracefully on SIGINT/SIGTERM. The passthrough forward-and-stream core is reused verbatim as the streamThrough branch by P1.M4.",
               "subtasks": [
                 {
@@ -132,7 +132,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T4.S2",
                   "title": "Minimal transparent passthrough handler + graceful shutdown",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T4.S1"
@@ -187,7 +187,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Rewrite edge cases + tests (de-dup, ordering, non-string values, nil/empty)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"

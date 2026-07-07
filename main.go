@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -152,22 +155,9 @@ func logStartup(l *logger, cfg Config) {
 	})
 }
 
-// passthroughHandler is a PLACEHOLDER registered for every non-/healthz path.
-// P1.M1.T4.S2 replaces this stub with the real transparent forwarder (a manual
-// upstream POST that streams SSE responses) and adds graceful shutdown; the
-// registration line `mux.HandleFunc("/", passthroughHandler)` in main is the
-// exact swap target (e.g. -> mux.HandleFunc("/", newProxyHandler(cfg, log))).
-//
-// Until T4.S2 lands, non-health requests get 501 so a partial build can never
-// silently masquerade as a working proxy. /healthz is unaffected and fully
-// functional (PRD §9: only /healthz is intercepted).
-func passthroughHandler(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, `{"error":"passthrough not implemented (P1.M1.T4.S2)"}`, http.StatusNotImplemented)
-}
-
 // main is the proxy bootstrap: resolve config, build the redacting logger, emit
-// the startup event, register the two routes, and serve. Graceful shutdown
-// (SIGINT/SIGTERM -> server.Shutdown, 10s deadline) is P1.M1.T4.S2 — NOT here.
+// the startup event, build the upstream client, register the two routes, arm the
+// graceful-shutdown handler, and serve (PRD §16).
 func main() {
 	// Resolve config (discovery + env overrides + validation). The contract's
 	// `cfg,_` is shorthand: a real error here MUST fail fast (a bad listen address
@@ -186,15 +176,32 @@ func main() {
 	log := newLogger(os.Stderr, cfg.LogLevel)
 	logStartup(log, cfg)
 
+	// T4.S2: build the shared upstream client ONCE (PRD §17).
+	client := newUpstreamClient()
+
 	// Route table (PRD §9): /healthz intercepted; EVERYTHING else forwards.
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthHandler) // exact match
-	mux.HandleFunc("/", passthroughHandler)   // subtree catch-all (T4.S2 swaps this)
+	mux.HandleFunc("/healthz", healthHandler)              // exact match
+	mux.HandleFunc("/", newProxyHandler(cfg, log, client)) // subtree catch-all (was the T4.S1 501 stub)
 
 	// CRITICAL: NO ReadTimeout/WriteTimeout — a write deadline would truncate the
 	// streamed SSE responses (PRD §8/§11.3, P1.M3/P1.M4). Addr+Handler only. T4.S2
 	// calls srv.Shutdown(ctx) on this object.
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux}
+
+	// T4.S2: graceful shutdown (PRD §16). Runs in its own goroutine so
+	// ListenAndServe stays on the main goroutine. SIGINT (Ctrl-C) / SIGTERM
+	// (kill) -> log one "shutdown" line -> Shutdown drains within 10s ->
+	// ListenAndServe returns http.ErrServerClosed -> main falls through to exit 0.
+	go func() {
+		sigCh := make(chan os.Signal, 1) // buffered: don't drop a fast signal
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		sig := <-sigCh
+		log.log("info", "shutdown", map[string]any{"signal": sig.String()})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
 
 	// ListenAndServe blocks until error or Shutdown. ErrServerClosed is the normal
 	// return when Shutdown is called (T4.S2 adds that path); treat it non-fatal so
@@ -203,4 +210,5 @@ func main() {
 		log.log("error", "listen", map[string]any{"err": err.Error(), "listen": cfg.Listen})
 		os.Exit(1)
 	}
+	// ErrServerClosed (from Shutdown) falls through here -> clean exit 0.
 }

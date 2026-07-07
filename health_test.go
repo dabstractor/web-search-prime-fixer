@@ -116,41 +116,42 @@ func TestLogStartup(t *testing.T) {
 	}
 }
 
-// (e) Routing table (PRD §9): only /healthz is intercepted; everything else hits
-// the passthrough stub (501). Built via the SAME mux main() builds.
+// (e) Routing table (PRD §9): only /healthz is intercepted; it NEVER calls the
+// upstream (PRD §16/§19.3 case 5). Built via the SAME mux main() builds. The
+// "/mcp forwards" half is covered by proxy_test.go.
 func TestRouting_HealthzOnly(t *testing.T) {
+	hits := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer up.Close()
+
+	cfg := DefaultConfig()
+	cfg.Upstream = up.URL
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("/", passthroughHandler) // the 501 stub
+	mux.HandleFunc("/", newProxyHandler(cfg, newLogger(io.Discard, "error"), newUpstreamClient()))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	// /healthz -> health (200, ok+version).
 	resp, err := http.Get(ts.URL + "/healthz")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("/healthz status = %d, want 200", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
 	var m map[string]any
-	json.Unmarshal(body, &m)
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatalf("/healthz body not valid JSON: %v (raw=%q)", err, body)
+	}
 	if m["ok"] != true {
 		t.Errorf("/healthz body ok = %#v, want true (routed to healthHandler)", m["ok"])
 	}
-
-	// /mcp and /healthz/ -> the stub (501), proving they are NOT intercepted.
-	for _, p := range []string{"/mcp", "/healthz/", "/initialize", "/foo/bar"} {
-		resp, err := http.Get(ts.URL + p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusNotImplemented {
-			t.Errorf("%s status = %d, want 501 (must route to stub, not health)", p, resp.StatusCode)
-		}
+	if hits != 0 {
+		t.Errorf("upstream hit %d times for /healthz, want 0 (isolation)", hits)
 	}
 }
