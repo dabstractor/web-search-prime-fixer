@@ -1,0 +1,14 @@
+{
+  "upstream": "https://api.z.ai/api/mcp/web_search_prime/mcp",
+  "listen": "127.0.0.1:8787",
+  "path": "/mcp",
+  "aliases": [
+    "query",
+    "q",
+    "search",
+    "searchQuery",
+    "search_term"
+  ],
+  "target_param": "search_query",
+  "log_level": "info"
+}

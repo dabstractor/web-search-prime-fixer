@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "web-search-prime-fixer v1.0 — Local MCP alias-fixing proxy",
-      "status": "Researching",
+      "status": "Complete",
       "description": "The complete MVP: a single Go binary (stdlib only) that transparently proxies the z.ai web-search-prime MCP Streamable HTTP server. It performs exactly one mutation — renaming configured aliases (query, q, search, searchQuery, search_term) to the canonical 'search_query' parameter on outbound tools/call requests — and prepends a terse teaching warning to the matching SSE result so the agent learns the correct name and does not retry. All other traffic passes through byte-for-byte. Research artifacts: plan/001_c0abc3757e9a/architecture/system_context.md (greenfield state + validated z.ai schema) and external_deps.md (stdlib feasibility, 6 points verified against go1.26.4 source).",
       "milestones": [
         {
@@ -424,7 +424,7 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "End-to-end verification & changeset-level documentation",
-          "status": "Researching",
+          "status": "Complete",
           "description": "httptest end-to-end suite proving the PRD §21 success criteria, the final go vet/go test/build quality gate, and changeset-level docs (README + config example). PRD §20 steps 5-7, §19.3, §21. The final Task is the MODE B documentation sweep that depends on every implementing subtask.",
           "tasks": [
             {
@@ -504,7 +504,7 @@
               "type": "Task",
               "id": "P1.M5.T3",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "MODE B final documentation task (per SOW §5). Captures the cross-cutting user-facing surface of the entire changeset: README.md (install, run, client config, behavior, success criteria) and config.example.json (documented). Depends on EVERY implementing subtask so it runs last and reflects the final, shipped behavior. Per-feature/JSDoc docs already rode with their implementing subtasks (Mode A); this sweeps the overview-level docs only.",
               "subtasks": [
                 {
@@ -535,7 +535,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T3.S2",
                   "title": "config.example.json + doc.go package comment polish",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2",
