@@ -155,14 +155,14 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "The rewrite rule (rewrite.go)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "A pure, table-tested function that renames configured aliases to TargetParam ('search_query') in a tools/call arguments map. No I/O, no external calls — fully unit-testable. PRD §10, §19.1. This is PRD §20 step 2.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Rewrite function + algorithm + table tests",
-              "status": "Ready",
+              "status": "Complete",
               "description": "RewriteResult type and the Rewrite(args, aliases, target) pure function implementing the PRD §10 algorithm, with the full section-10 example table green.",
               "subtasks": [
                 {
@@ -187,7 +187,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Rewrite edge cases + tests (de-dup, ordering, non-string values, nil/empty)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
