@@ -241,14 +241,14 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "SSE event reader/parser",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Decode an SSE byte stream into Event structs per WHATWG/RFC 8895 framing. Handles comments, field:value space-stripping, multi-line data concatenation, blank-line dispatch, and EOF final-event flush.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "SSE Event type + reader (WHATWG framing, unbounded lines, EOF flush)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S1"
