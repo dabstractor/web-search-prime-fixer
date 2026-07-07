@@ -122,3 +122,39 @@ func (rd *Reader) dispatch() Event {
 func (rd *Reader) reset() {
 	rd.id, rd.event, rd.data = "", "", nil
 }
+
+// warningText renders RewriteResult.Notes (rewrite.go) as the single-line
+// agent-facing SSE warning defined by PRD §12.3. The notes arrive already
+// formatted by Rewrite as the literal PRD §10 algorithm strings; warningText
+// joins them VERBATIM with "; " and wraps them as:
+//
+//	[web-search-prime-fixer] <note[0]>; <note[1]>; ... . <suffix>
+//
+// SUFFIX RULE (PRD §12.3):
+//   - If EVERY note is an "ignored" note (Rewrite emitted it because the target
+//     was already present), the suffix is:
+//     ` Use only "search_query" to avoid this notice.`
+//   - Otherwise (at least one renamed or dropped note), the suffix is:
+//     ` Use "search_query" in future calls.`
+//
+// An "ignored" note is one beginning with the literal prefix "ignored " (the only
+// one of the three note kinds that does — renamed begins with `"` and dropped
+// with `dropped `). An empty notes slice returns "" (nothing to inject); callers
+// only invoke warningText with a non-empty Notes from a Changed RewriteResult.
+func warningText(notes []string) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	allIgnored := true
+	for _, n := range notes {
+		if !strings.HasPrefix(n, "ignored ") {
+			allIgnored = false
+			break
+		}
+	}
+	suffix := ` Use "search_query" in future calls.`
+	if allIgnored {
+		suffix = ` Use only "search_query" to avoid this notice.`
+	}
+	return "[web-search-prime-fixer] " + strings.Join(notes, "; ") + "." + suffix
+}

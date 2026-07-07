@@ -200,3 +200,73 @@ func TestSSE_Framing_Table(t *testing.T) {
 		})
 	}
 }
+
+// TestWarningText_Table proves the PRD §12.3 warning-text format: the envelope,
+// the "; " verbatim join of rewrite.go's note strings, and the two-branch
+// suffix rule (all-ignored -> "avoid this notice"; otherwise -> "in future// calls"). Each row feeds a literal note slice (matching rewrite.go's PRD §10
+// algorithm output) and asserts a byte-exact §12.3 string.
+func TestWarningText_Table(t *testing.T) {
+	// Note literals come from rewrite.go's PRD §10 algorithm strings (joined
+	// verbatim). PRD §12.3 dictates the envelope + suffix.
+	tests := []struct {
+		name  string
+		notes []string
+		want  string
+	}{
+		{
+			// PRD §12.3 example 1: {"query":"x"} -> renamed.
+			"renamed_only_future_calls",
+			[]string{`"query" is not a valid parameter; renamed to "search_query"`},
+			`[web-search-prime-fixer] "query" is not a valid parameter; renamed to "search_query". Use "search_query" in future calls.`,
+		},
+		{
+			// PRD §12.3 example 2: {"query":"x","q":"y"} -> renamed + dropped.
+			"renamed_and_dropped_future_calls",
+			[]string{
+				`"query" is not a valid parameter; renamed to "search_query"`,
+				`dropped redundant "q"`,
+			},
+			`[web-search-prime-fixer] "query" is not a valid parameter; renamed to "search_query"; dropped redundant "q". Use "search_query" in future calls.`,
+		},
+		{
+			// {"query":"x","search_query":"y"} -> target wins, query ignored.
+			"ignored_only_avoid_notice",
+			[]string{`ignored "query" (use only "search_query")`},
+			`[web-search-prime-fixer] ignored "query" (use only "search_query"). Use only "search_query" to avoid this notice.`,
+		},
+		{
+			// Multiple ignored aliases (e.g. {"query":x,"q":y,"search_query":z})
+			// -> still all-ignored -> avoid-notice suffix.
+			"multiple_ignored_avoid_notice",
+			[]string{
+				`ignored "query" (use only "search_query")`,
+				`ignored "q" (use only "search_query")`,
+			},
+			`[web-search-prime-fixer] ignored "query" (use only "search_query"); ignored "q" (use only "search_query"). Use only "search_query" to avoid this notice.`,
+		},
+		{
+			// Mixed: one ignored + one renamed -> NOT all-ignored -> future-calls.
+			"mixed_ignored_and_renamed_future_calls",
+			[]string{
+				`ignored "query" (use only "search_query")`,
+				`"search" is not a valid parameter; renamed to "search_query"`,
+			},
+			`[web-search-prime-fixer] ignored "query" (use only "search_query"); "search" is not a valid parameter; renamed to "search_query". Use "search_query" in future calls.`,
+		},
+		{
+			// Defensive: empty notes -> "" (injector only calls with non-empty,
+			// but guard against a malformed "[web-search-prime-fixer] . Use…" stub).
+			"empty_returns_empty",
+			nil,
+			``,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := warningText(tc.notes)
+			if got != tc.want {
+				t.Errorf("warningText(%#v):\n got %q\nwant %q", tc.notes, got, tc.want)
+			}
+		})
+	}
+}
