@@ -173,7 +173,6 @@ func TestSSE_Framing_Table(t *testing.T) {
 		in   string
 		want Event
 	}{
-		{"comment_ignored", ": a comment\ndata:foo\n\n", Event{Type: "message", Data: "foo"}},
 		{"one_leading_space_stripped", "data: foo\n\n", Event{Type: "message", Data: "foo"}},
 		{"two_leading_spaces_keep_one", "data:  foo\n\n", Event{Type: "message", Data: " foo"}},
 		{"default_event_type_message", "data:foo\n\n", Event{Type: "message", Data: "foo"}},
@@ -198,6 +197,45 @@ func TestSSE_Framing_Table(t *testing.T) {
 				t.Errorf("second Next() err=%v, want io.EOF", err)
 			}
 		})
+	}
+}
+
+// TestSSE_CommentPreserved guards validation ISSUE 2: WHATWG comment lines
+// (leading ':') are surfaced as standalone Events with Comment set, in stream
+// order, and re-emitted VERBATIM by emitEvent. A heartbeat like ":keepalive"
+// interleaved before a data event therefore survives the rewrite path (a dropped
+// heartbeat on a long aliased stream could let an intermediary time the
+// connection out).
+func TestSSE_CommentPreserved(t *testing.T) {
+	rd := NewSSEReader(strings.NewReader(": a comment\ndata:foo\n\n"))
+	cmt, err := rd.Next()
+	if err != nil {
+		t.Fatalf("first Next() err=%v, want nil", err)
+	}
+	if cmt.Comment != ": a comment" {
+		t.Errorf("comment event Comment=%q, want %q", cmt.Comment, ": a comment")
+	}
+	if cmt.Data != "" || cmt.ID != "" || cmt.Type != "" {
+		t.Errorf("comment event leaked data/id/type: %+v", cmt)
+	}
+	// emitEvent re-emits the comment verbatim (no data: line, no dispatch blank line).
+	var sb strings.Builder
+	if err := emitEvent(&sb, cmt); err != nil {
+		t.Fatalf("emitEvent comment err=%v", err)
+	}
+	if got := sb.String(); got != ": a comment\n" {
+		t.Errorf("emitEvent comment = %q, want %q", got, ": a comment\n")
+	}
+	// The data event after the comment is still decoded normally.
+	ev, err := rd.Next()
+	if err != nil {
+		t.Fatalf("second Next() err=%v, want nil", err)
+	}
+	if ev.Type != "message" || ev.Data != "foo" {
+		t.Errorf("post-comment event = %+v, want {Type:message Data:foo}", ev)
+	}
+	if _, err := rd.Next(); err != io.EOF {
+		t.Errorf("third Next() err=%v, want io.EOF", err)
 	}
 }
 
@@ -313,7 +351,7 @@ func TestSSE_Inject_ToolCallPrependsWarning(t *testing.T) {
 	json.Unmarshal([]byte(origResult), &origObj)
 	origText := origObj["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 
-	out := injectAll(t, string(raw), map[any]bool{float64(2): true}, injectWarning)
+	out := injectAll(t, string(raw), map[any]bool{json.Number("2"): true}, injectWarning)
 	ev := firstEventData(t, out)
 
 	var obj map[string]any
@@ -368,7 +406,7 @@ func TestSSE_Inject_InitializePassthrough(t *testing.T) {
 	if err != nil {
 		t.Skipf("testdata fixture missing: %v", err)
 	}
-	out := injectAll(t, string(raw), map[any]bool{float64(2): true}, injectWarning)
+	out := injectAll(t, string(raw), map[any]bool{json.Number("2"): true}, injectWarning)
 	ev := firstEventData(t, out)
 	if ev.Data != initJSON {
 		t.Errorf("initialize Data changed:\n got %q\nwant %q", ev.Data, initJSON)
@@ -401,7 +439,7 @@ func TestSSE_Inject_ErrorResultPassthrough(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			wantData := firstEventData(t, tc.sse).Data
-			out := injectAll(t, tc.sse, map[any]bool{float64(2): true}, injectWarning)
+			out := injectAll(t, tc.sse, map[any]bool{json.Number("2"): true}, injectWarning)
 			gotData := firstEventData(t, out).Data
 			if gotData != wantData {
 				t.Errorf("error-result Data changed:\n got %q\nwant %q", gotData, wantData)
@@ -418,7 +456,7 @@ func TestSSE_Inject_MultilineRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Skipf("testdata fixture missing: %v", err)
 	}
-	out := injectAll(t, string(raw), map[any]bool{float64(2): true}, injectWarning)
+	out := injectAll(t, string(raw), map[any]bool{json.Number("2"): true}, injectWarning)
 	ev := firstEventData(t, out)
 	var obj map[string]any
 	if err := json.Unmarshal([]byte(ev.Data), &obj); err != nil {

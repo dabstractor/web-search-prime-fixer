@@ -108,7 +108,15 @@ func newProxyHandler(cfg Config, log *logger, client *http.Client) http.HandlerF
 		// retries) from the actual forwarded length — even after re-serialization
 		// changed the byte count. (Verified: Transport writes Content-Length from
 		// outReq.ContentLength, ignoring a stale copied header.)
-		outReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, cfg.Upstream, bytes.NewReader(dec.body))
+		//
+		// METHOD PRESERVED (PRD §11.2): forward the ORIGINAL request method, not a
+		// hardcoded POST. MCP Streamable HTTP permits a client GET to open the
+		// server-initiated notification SSE stream; converting it to POST would
+		// prevent that channel from opening. POST JSON-RPC (the common path for
+		// pi/Claude Code/Cursor) still works exactly as before because the client
+		// method is POST. A GET carries no body, so bytes.NewReader(dec.body)
+		// (typically empty for a GET) is the right source.
+		outReq, err := http.NewRequestWithContext(r.Context(), r.Method, cfg.Upstream, bytes.NewReader(dec.body))
 		if err != nil {
 			log.log("error", "upstream_error", map[string]any{"err": err.Error()})
 			http.Error(rw, `{"error":"bad upstream request"}`, http.StatusBadGateway)
@@ -206,17 +214,25 @@ func forward(client *http.Client, rw http.ResponseWriter, outReq *http.Request, 
 			"req_id": dec.reqID,
 		})
 	}
+	// isSSE keys on the ACTUAL RESPONSE media type, not on the rewrite decision,
+	// so a non-SSE body (e.g. a 401 JSON error returned for an aliased tools/call)
+	// is copied verbatim and never fed to the SSE injector — which would otherwise
+	// decode it as an empty stream and drop it (FR-1/FR-3).
+	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+	// injecting is true ONLY on the rewrite path AND for an SSE response: that is
+	// the single case where the body is re-serialized by Inject and its byte count
+	// (hence Content-Length) changes. Every other combination copies the body
+	// verbatim, so the upstream Content-Length stays accurate and is preserved
+	// (dropping it on a JSON error body can confuse a length-reading client).
+	injecting := !dec.streamThrough && isSSE
 	// Copy non-hop-by-hop response headers BEFORE WriteHeader (WriteHeader locks
 	// the header map). Content-Type, Mcp-Session-Id, Cache-Control, Vary, X-Log-Id
 	// pass through; Transfer-Encoding/Connection etc. are stripped (hop-by-hop).
-	// On the rewrite path (dec.streamThrough == false) the body is re-serialized by
-	// Inject, so its byte count changes and the upstream's Content-Length would be
-	// stale -> drop it (mirrors the request-side handling in newProxyHandler).
 	for k, vs := range resp.Header {
 		if isHopByHop(k) {
 			continue
 		}
-		if !dec.streamThrough && http.CanonicalHeaderKey(k) == "Content-Length" {
+		if injecting && http.CanonicalHeaderKey(k) == "Content-Length" {
 			continue
 		}
 		for _, v := range vs {
@@ -229,20 +245,26 @@ func forward(client *http.Client, rw http.ResponseWriter, outReq *http.Request, 
 	// flushes (per emitted event on Inject; per read chunk on io.Copy). Flush adds
 	// no bytes, so the passthrough path stays byte-for-byte identical (PRD §11.3/§6).
 	var w io.Writer = rw
-	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if isSSE {
 		if f, ok := rw.(http.Flusher); ok {
 			w = flushWriter{w: rw, f: f}
 		}
 	}
-	if dec.streamThrough {
+	if dec.streamThrough || !isSSE {
 		// Passthrough: stream the upstream body unchanged, no warning (PRD §11.3/§6).
+		// This branch ALSO covers the rewrite path when the response is not SSE —
+		// e.g. an upstream error body (401/429/5xx) returned as JSON, or a 200 JSON
+		// result. The teaching warning is only meaningful INSIDE an SSE result, so
+		// nothing is lost by copying such a body verbatim (FR-1: "transparently
+		// forwards ... and streams the response back"; FR-3).
 		if _, err := io.Copy(w, resp.Body); err != nil {
 			log.log("warn", "upstream_error", map[string]any{"err": err.Error()})
 		}
 	} else {
-		// Rewrite path: feed the upstream body through the SSE injector keyed on
-		// the rewritten request ids; matching tools/call results get the warning
-		// prepended (PRD §11.3/§12). Non-matching events pass through unchanged.
+		// Rewrite path with an SSE response: feed the upstream body through the SSE
+		// injector keyed on the rewritten request ids; matching tools/call results
+		// get the warning prepended (PRD §11.3/§12). Non-matching events pass
+		// through unchanged.
 		if err := Inject(w, resp.Body, dec.rewrittenIDs, dec.warning); err != nil {
 			log.log("warn", "upstream_error", map[string]any{"err": err.Error()})
 		}
@@ -332,9 +354,21 @@ type rewriteDecision struct {
 // when it decodes the response id the same way. String ids decode to string and
 // match identically. Never build rewrittenIDs from an int key —
 // map[any]bool{int(2):true} would NOT match float64(2) (verified).
+//
+// PRECISION (validation ISSUE 3): decoding into any maps EVERY JSON number to
+// float64, which silently corrupts integer ids whose magnitude exceeds 2^53
+// (e.g. 12345678901234567 -> 12345678901234568 on the re-serialized rewrite
+// path). To preserve full precision, decode with json.Decoder.UseNumber(): numeric
+// values then become json.Number (a string-backed type) whose original digits are
+// preserved through re-serialization. Inject decodes the response id the SAME way
+// (UseNumber), so json.Number matches json.Number by string equality. reqID is
+// therefore a json.Number for numeric ids (string for string ids, nil otherwise);
+// it still marshals to the correct JSON number in logs.
 func decideRewrite(body []byte, cfg Config) rewriteDecision {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber() // preserve full numeric precision (validation ISSUE 3)
 	var parsed any
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	if err := dec.Decode(&parsed); err != nil {
 		// Not valid JSON -> forward unchanged (never reject on a parse quirk).
 		return rewriteDecision{body: body, streamThrough: true}
 	}
@@ -342,7 +376,8 @@ func decideRewrite(body []byte, cfg Config) rewriteDecision {
 	var rewrittenIDs map[any]bool
 	var notes []string
 	// addID records a rewritten object's id + notes. The id is the DECODED value
-	// (float64 for numbers) — the key Inject matches on the response side.
+	// (json.Number for numbers under UseNumber) — the key Inject matches on the
+	// response side (which also decodes with UseNumber, so the types agree).
 	addID := func(id any, n []string) {
 		if rewrittenIDs == nil {
 			rewrittenIDs = make(map[any]bool)

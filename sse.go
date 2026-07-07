@@ -14,10 +14,20 @@ import (
 // it carries the JSON-RPC message on the wire and must be free of any trailing
 // newline so the writer (P1.M3.T3.S2) can split it back into "data:" lines and
 // reproduce the original bytes (round-trip symmetry, PRD §8.10).
+//
+// COMMENT (validation ISSUE 2): a WHATWG comment line (one beginning with ':')
+// is surfaced as an Event with Comment set to the raw line text (without its
+// trailing newline) and every other field zero. emitEvent re-emits a comment
+// event VERBATIM followed by a terminating newline, so heartbeat comments
+// (":keepalive") survive the rewrite path instead of being dropped — a dropped
+// heartbeat on a long aliased stream could let an intermediary time the
+// connection out. Comment events are produced ONLY by the reader; Inject never
+// synthesizes one.
 type Event struct {
-	ID   string
-	Type string
-	Data string
+	ID      string
+	Type    string
+	Data    string
+	Comment string // raw comment line (incl. leading ':') when this event is a comment; else ""
 }
 
 // Reader decodes a Server-Sent Events stream (RFC/WHATWG framing) from an
@@ -76,7 +86,11 @@ func (rd *Reader) Next() (Event, error) {
 				continue
 			}
 			if strings.HasPrefix(line, ":") { // comment line
-				continue
+				// Surface the comment as its own event so the writer can re-emit it
+				// verbatim in stream order (validation ISSUE 2: heartbeats must survive
+				// the rewrite path). A comment carries no data/id/event, so dispatch
+				// does not flush any accumulated event here — the next blank line does.
+				return Event{Comment: line}, nil
 			}
 			field, value := line, ""
 			if i := strings.IndexByte(line, ':'); i >= 0 {
@@ -205,9 +219,17 @@ func Inject(w io.Writer, body io.Reader, rewrittenIDs map[any]bool, warning stri
 // a rewritten tools/call result; otherwise it returns data UNCHANGED (PRD §12.2
 // guards 1–7). It never touches isError and never fails (a parse/re-serialize
 // error means "not a result we can inject into" → return the original data).
+//
+// ID MATCHING: decodes with json.Decoder.UseNumber() so numeric ids are
+// json.Number (string-backed), matching exactly how decideRewrite keyed
+// rewrittenIDs. The two MUST use the same number decoding strategy, otherwise a
+// numeric request id (json.Number on the request side) would never match a
+// float64 response id (validation ISSUE 3 fix).
 func injectData(data string, rewrittenIDs map[any]bool, warning string) string {
 	var obj map[string]any
-	if err := json.Unmarshal([]byte(data), &obj); err != nil {
+	dec := json.NewDecoder(strings.NewReader(data))
+	dec.UseNumber() // match decideRewrite's numeric decoding (json.Number)
+	if err := dec.Decode(&obj); err != nil {
 		return data // 1. not JSON -> unchanged
 	}
 	if _, isJSONRPCError := obj["error"]; isJSONRPCError {
@@ -245,7 +267,16 @@ func injectData(data string, rewrittenIDs map[any]bool, warning string) string {
 // (the "message" default is omitted on the wire, matching z.ai's tools/call form),
 // one "data:<line>" per "\n"-separated piece of Event.Data (the reverse of the
 // reader's Join), and a terminating blank line.
+//
+// COMMENT events (Event.Comment != "") are written VERBATIM: the raw comment
+// line (including its leading ':') followed by a single newline, and NO blank
+// line (WHATWG comments are not events and need no dispatch terminator). This
+// preserves heartbeat lines on the rewrite path (validation ISSUE 2).
 func emitEvent(w io.Writer, ev Event) error {
+	if ev.Comment != "" {
+		_, err := io.WriteString(w, ev.Comment+"\n")
+		return err
+	}
 	var b strings.Builder
 	if ev.ID != "" {
 		b.WriteString("id:")

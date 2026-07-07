@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -250,7 +251,7 @@ func TestDecideRewrite(t *testing.T) {
 		{
 			"toolscall_query_renamed",
 			dcArgsQueryBody,
-			false, false, "search_query", float64(2), "renamed",
+			false, false, "search_query", json.Number("2"), "renamed",
 		},
 		// tools/call already canonical -> unchanged (PRD §10 row 6). BYTE-IDENTITY.
 		{
@@ -277,12 +278,12 @@ func TestDecideRewrite(t *testing.T) {
 			true, true, "", nil, "",
 		},
 		// JSON ARRAY (defensive batch): element[1] tools/call with alias -> rewrite;
-		// body re-serialized as an array; one rewritten id (float64(5)) (PRD §11.1 point 2).
+		// body re-serialized as an array; one rewritten id (json.Number("5")) (PRD §11.1 point 2).
 		{
 			"array_batch_one_rewrite",
 			`[{"jsonrpc":"2.0","method":"initialize","id":1},` +
 				`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"arguments":{"q":"hi"}}}]`,
-			false, false, "search_query", float64(5), "renamed",
+			false, false, "search_query", json.Number("5"), "renamed",
 		},
 		// JSON ARRAY with NO tools/call rewrite -> unchanged, BYTE-IDENTITY.
 		{
@@ -330,7 +331,7 @@ func TestDecideRewrite(t *testing.T) {
 		{
 			"toolscall_query_and_q",
 			`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"arguments":{"query":"x","q":"y"}}}`,
-			false, false, "search_query", float64(9), "dropped",
+			false, false, "search_query", json.Number("9"), "dropped",
 		},
 	}
 	for _, tc := range tests {
@@ -352,7 +353,7 @@ func TestDecideRewrite(t *testing.T) {
 					t.Fatalf("rewrittenIDs len=%d, want 1: %#v", len(dec.rewrittenIDs), dec.rewrittenIDs)
 				}
 				if !dec.rewrittenIDs[tc.wantIDKey] {
-					t.Errorf("rewrittenIDs missing key %#v (float64 contract): %#v", tc.wantIDKey, dec.rewrittenIDs)
+					t.Errorf("rewrittenIDs missing key %#v (json.Number contract): %#v", tc.wantIDKey, dec.rewrittenIDs)
 				}
 			} else if len(dec.rewrittenIDs) != 0 {
 				t.Errorf("expected no rewritten ids, got %#v", dec.rewrittenIDs)
@@ -380,19 +381,46 @@ func TestDecideRewrite(t *testing.T) {
 	}
 }
 
-// TestDecideRewrite_Float64IDContract pins the load-bearing contract with
-// sse.Inject: numeric ids are keyed by float64(N), and an int(N) key does NOT
-// match (the producer and consumer both decode via encoding/json -> float64).
-func TestDecideRewrite_Float64IDContract(t *testing.T) {
+// TestDecideRewrite_IDContract pins the load-bearing contract with sse.Inject:
+// numeric ids are keyed by json.Number(N) under UseNumber decoding (both the
+// request side here and the response side in injectData decode the same way, so
+// they match by string equality). A float64(N) key does NOT match (the producer
+// and consumer do not use the default any decoding).
+func TestDecideRewrite_IDContract(t *testing.T) {
 	dec := decideRewrite([]byte(dcArgsQueryBody), dcCfg) // id:2
 	if dec.streamThrough {
 		t.Fatal("expected a rewrite, got streamThrough")
 	}
-	if !dec.rewrittenIDs[float64(2)] {
-		t.Errorf("rewrittenIDs[float64(2)]=false, want true (Inject matches this)")
+	if !dec.rewrittenIDs[json.Number("2")] {
+		t.Errorf("rewrittenIDs[json.Number(\"2\")]=false, want true (Inject matches this)")
+	}
+	if dec.rewrittenIDs[float64(2)] {
+		t.Errorf("rewrittenIDs[float64(2)]=true, want false — float64 keys must NOT match")
 	}
 	if dec.rewrittenIDs[int(2)] {
 		t.Errorf("rewrittenIDs[int(2)]=true, want false — int keys must NOT match")
+	}
+}
+
+// TestDecideRewrite_LargeIntIDPrecision guards validation ISSUE 3: an integer id
+// whose magnitude exceeds 2^53 must survive the rewrite path's re-serialization
+// UNCHANGED. Under the default any decoding every number becomes float64 and
+// loses precision past 2^53; UseNumber keeps the original digits as json.Number.
+func TestDecideRewrite_LargeIntIDPrecision(t *testing.T) {
+	// 12345678901234567 > 2^53; float64 would round it to 12345678901234568.
+	const wantID = `12345678901234567`
+	body := `{"jsonrpc":"2.0","id":` + wantID + `,"method":"tools/call","params":{"arguments":{"query":"x"}}}`
+	dec := decideRewrite([]byte(body), dcCfg)
+	if dec.streamThrough {
+		t.Fatal("expected a rewrite, got streamThrough")
+	}
+	// The id key is preserved exactly (json.Number holds the literal digits).
+	if !dec.rewrittenIDs[json.Number(wantID)] {
+		t.Errorf("rewrittenIDs missing json.Number(%q); got %#v", wantID, dec.rewrittenIDs)
+	}
+	// And the RE-SERIALIZED body still carries the exact id digits (no rounding).
+	if !bytes.Contains(dec.body, []byte(`"id":`+wantID)) {
+		t.Errorf("re-serialized body lost id precision:\n got %s\nwant id=%s", dec.body, wantID)
 	}
 }
 
@@ -480,6 +508,83 @@ func TestForward_Non2xxCopiedThroughAndLogged(t *testing.T) {
 	}
 }
 
+// TestForward_NonSSEErrorBodyPreservedOnRewritePath guards validation ISSUE 1: on
+// the REWRITE path (an aliased tools/call), a non-SSE upstream response — here a
+// 401 with a JSON error body — must be copied through VERBATIM. Before the fix,
+// forward unconditionally ran the SSE injector on the rewrite path, which decoded
+// the non-SSE body as an empty stream and wrote zero bytes (the error message was
+// lost — contradicting FR-1/FR-3).
+func TestForward_NonSSEErrorBodyPreservedOnRewritePath(t *testing.T) {
+	const errBody = `{"error":{"code":-32600,"message":"API key invalid"}}`
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized) // 401
+		_, _ = io.WriteString(w, errBody)
+	}))
+	defer up.Close()
+
+	var buf bytes.Buffer
+	proxy := captureProxy(t, up.URL, &buf, "warn")
+	defer proxy.Close()
+
+	// Aliased tools/call ("query" -> search_query) -> rewrite path. The upstream
+	// returns a non-SSE JSON error body; the proxy must forward it unchanged.
+	resp, err := http.Post(proxy.URL, "application/json",
+		strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"arguments":{"query":"x"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (copy-through)", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != errBody {
+		t.Errorf("non-SSE error body dropped on rewrite path:\n got %q\nwant %q", got, errBody)
+	}
+	// Content-Type is also preserved (the injector never ran, so no body mutation).
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	// The upstream Content-Length must also survive (it is dropped ONLY when Inject
+	// re-serializes the body, which it does not for a non-SSE response).
+	if cl := resp.Header.Get("Content-Length"); cl != strconv.Itoa(len(errBody)) {
+		t.Errorf("Content-Length = %q, want %d", cl, len(errBody))
+	}
+}
+
+// TestForward_GETMethodPreserved guards validation ISSUE 4: a client GET is
+// forwarded as GET (not converted to an empty-body POST). MCP Streamable HTTP
+// permits a GET to open the server-initiated notification SSE stream; converting
+// it to POST would prevent that channel from opening.
+func TestForward_GETMethodPreserved(t *testing.T) {
+	var gotMethod string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer up.Close()
+
+	proxy := newTestProxy(up.URL)
+	defer proxy.Close()
+
+	req, err := http.NewRequest(http.MethodGet, proxy.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if gotMethod != http.MethodGet {
+		t.Errorf("upstream saw method %q, want %q", gotMethod, http.MethodGet)
+	}
+}
+
 // (7) A 2xx response emits NO upstream_error line (the log fires only on non-2xx).
 func TestForward_2xxNoUpstreamError(t *testing.T) {
 	var got http.Request
@@ -537,16 +642,16 @@ func TestDecideRewrite_ReqID(t *testing.T) {
 		body string
 		want any
 	}{
-		{"numeric_id", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"arguments":{"query":"x"}}}`, float64(2)},
+		{"numeric_id", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"arguments":{"query":"x"}}}`, json.Number("2")},
 		{"string_id", `{"jsonrpc":"2.0","id":"abc","method":"tools/call","params":{"arguments":{"query":"x"}}}`, "abc"},
 		{"no_id_notification", `{"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"query":"x"}}}`, nil},
-		{"initialize", `{"jsonrpc":"2.0","method":"initialize","id":1}`, float64(1)},
+		{"initialize", `{"jsonrpc":"2.0","method":"initialize","id":1}`, json.Number("1")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dec := decideRewrite([]byte(tc.body), dcCfg)
 			if dec.reqID != tc.want {
-				t.Errorf("reqID = %#v (want %#v); note numeric must be float64, not int", dec.reqID, tc.want)
+				t.Errorf("reqID = %#v (want %#v); note numeric must be json.Number (UseNumber), not float64/int", dec.reqID, tc.want)
 			}
 		})
 	}

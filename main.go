@@ -124,10 +124,19 @@ var version = "dev"
 // resource, so it always answers quickly and never depends on z.ai health
 // (PRD §16: "Does not touch the upstream").
 //
+// METHOD (validation NOTE 6): PRD §16 specifies GET /healthz. A non-GET method
+// (POST/HEAD/DELETE/...) is answered with 405 Method Not Allowed so a health
+// probe that accidentally POSTs cannot masquerade as a liveness check.
+//
 // The body is produced with json.Marshal of two scalars (bool + string), which
 // cannot fail for our inputs; the write to the ResponseWriter is best-effort and
 // its error is ignored, matching net/http handler convention.
 func healthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	// PATTERN: set headers BEFORE WriteHeader (once WriteHeader is called, later
 	// Header mutations are ignored).
 	w.Header().Set("Content-Type", "application/json")

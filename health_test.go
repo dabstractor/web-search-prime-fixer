@@ -65,6 +65,23 @@ func TestHealthHandler_NoUpstream(t *testing.T) {
 	}
 }
 
+// (c2) validation NOTE 6: PRD §16 specifies GET /healthz. A non-GET method is
+// rejected with 405 Method Not Allowed and an Allow: GET header so a health probe
+// that accidentally POSTs cannot masquerade as a liveness check.
+func TestHealthHandler_RejectsNonGET(t *testing.T) {
+	rr := httptest.NewRecorder()
+	healthHandler(rr, httptest.NewRequest(http.MethodPost, "/healthz", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405 (non-GET healthz)", rr.Code)
+	}
+	if allow := rr.Header().Get("Allow"); allow != "GET" {
+		t.Errorf("Allow = %q, want GET", allow)
+	}
+	if rr.Body.Len() != 0 {
+		t.Errorf("non-GET body = %q, want empty", rr.Body.String())
+	}
+}
+
 // (d) logStartup emits one info/startup line with the four config fields and NO
 // authorization field (PRD §15 "Never logs credentials").
 func TestLogStartup(t *testing.T) {
