@@ -208,21 +208,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "SSE warning injection (sse.go)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "SSE event reader (WHATWG framing) and the warning injector that prepends a text content block to a rewritten tools/call result, plus golden wire-format fixtures. PRD §12, §19.2, §19.4. This is PRD §20 step 3. Depends on P1.M2 (RewriteResult.Notes feeds warningText).",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "SSE golden fixtures (testdata)",
-              "status": "Planned",
+              "status": "Complete",
               "description": "Captured-from-spec wire-format fixtures so tests never depend on the live z.ai server. PRD §19.4, §8.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T2.S1",
                   "title": "testdata/initialize.sse + testdata/tools_call.sse (verified wire format)",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -241,14 +241,14 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "SSE event reader/parser",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Decode an SSE byte stream into Event structs per WHATWG/RFC 8895 framing. Handles comments, field:value space-stripping, multi-line data concatenation, blank-line dispatch, and EOF final-event flush.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "SSE Event type + reader (WHATWG framing, unbounded lines, EOF flush)",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S1"
@@ -266,14 +266,14 @@
               "type": "Task",
               "id": "P1.M3.T3",
               "title": "Warning injector + warningText",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Builds the human-readable warning line from RewriteResult.Notes, and the injector that, for a rewritten tools/call result event, prepends a {type:text,text:warning} content block and re-emits the event with correct SSE framing.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T3.S1",
                   "title": "warningText(notes) format (renamed/ignored/dropped + suffix rules)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -289,7 +289,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T3.S2",
                   "title": "SSE inject — prepend warning into tools/call result, re-emit with framing",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S1",

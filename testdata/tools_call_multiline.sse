@@ -1,0 +1,9 @@
+data:{
+data:"jsonrpc": "2.0",
+data:"id": 2,
+data:"result": {
+data:"content": [{"type": "text", "text": "[{\"title\":\"Example Search Result\",\"url\":\"https://example.com/result\",\"content\":\"Lorem ipsum dolor sit amet.\"}]"}],
+data:"isError": false
+data:}
+data:}
+

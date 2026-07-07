@@ -1,0 +1,2 @@
+data:{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"[{\"title\":\"Example Search Result\",\"url\":\"https://example.com/result\",\"content\":\"Lorem ipsum dolor sit amet.\"}]"}],"isError":false}}
+
