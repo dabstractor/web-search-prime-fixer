@@ -477,14 +477,14 @@
               "type": "Task",
               "id": "P1.M5.T2",
               "title": "Final quality gate",
-              "status": "Researching",
+              "status": "Complete",
               "description": "go vet + go test + build clean across the whole module. PRD §20 step 7, §18.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T2.S1",
                   "title": "go vet ./... + go test ./... + build verification",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T1.S2",
@@ -511,7 +511,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T3.S1",
                   "title": "README.md — install, run, client config, behavior, env vars",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2",
