@@ -209,7 +209,7 @@ func TestResolveConfig_EnvOverrides(t *testing.T) {
 	t.Run("path_and_aliases_not_overridable", func(t *testing.T) {
 		isolateConfigEnv(t)
 		t.Setenv("WSPF_PATH", "/should/be/ignored")
-		t.Setenv("WSPF_ALIASES", "ignored") // no such override; DefaultConfig.Aliases kept
+		t.Setenv("WSPF_QUERY_ALIASES", "ignored") // no such override; DefaultConfig.QueryAliases kept
 		cfg, err := ResolveConfig()
 		if err != nil {
 			t.Fatalf("err: %v", err)
@@ -217,8 +217,8 @@ func TestResolveConfig_EnvOverrides(t *testing.T) {
 		if cfg.Path != "/mcp" {
 			t.Errorf("Path=%q want /mcp (no WSPF_PATH override)", cfg.Path)
 		}
-		if !reflect.DeepEqual(cfg.Aliases, DefaultConfig().Aliases) {
-			t.Errorf("Aliases changed by non-existent WSPF_ALIASES: %+v", cfg.Aliases)
+		if !reflect.DeepEqual(cfg.QueryAliases, DefaultConfig().QueryAliases) {
+			t.Errorf("QueryAliases changed by non-existent WSPF_QUERY_ALIASES: %+v", cfg.QueryAliases)
 		}
 	})
 }
@@ -262,5 +262,56 @@ func TestResolveConfig_TargetParamForced(t *testing.T) {
 	}
 	if cfg.TargetParam != "search_query" {
 		t.Errorf("TargetParam=%q want forced \"search_query\"", cfg.TargetParam)
+	}
+}
+
+// (i) Tools validation (PRD §18.3). Tools/CanonicalTool/TargetTool have NO env
+// override, so these cases drive ResolveConfig via a config FILE (writeConfig +
+// WSPF_CONFIG), reusing isolateConfigEnv for hermeticity. The three rules:
+// (1) Tools empty -> error; (2) Tools missing CanonicalTool -> error;
+// (3) Tools contains TargetTool -> error. Plus one positive (valid extra tool).
+// Tests assert err != nil (presence), not the exact wording.
+func TestResolveConfig_ToolsValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		json    string
+		wantErr bool
+	}{
+		{
+			name:    "tools_empty",
+			json:    `{"tools":[]}`,
+			wantErr: true,
+		},
+		{
+			// Tools set to a list that does NOT contain the default CanonicalTool
+			// ("web_search") -> "must contain the canonical tool".
+			name:    "tools_missing_canonical",
+			json:    `{"tools":["not_the_canonical"],"canonical_tool":"web_search"}`,
+			wantErr: true,
+		},
+		{
+			// Tools includes the default TargetTool ("web_search_prime") ->
+			// "must not contain the target tool".
+			name:    "tools_contains_target",
+			json:    `{"tools":["web_search","web_search_prime"]}`,
+			wantErr: true,
+		},
+		{
+			// Positive: an extra advertised tool that is neither canonical-only nor
+			// the target. "search" is a legitimate client-facing alias tool name.
+			name:    "tools_valid_extra",
+			json:    `{"tools":["web_search","search"]}`,
+			wantErr: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			isolateConfigEnv(t)
+			t.Setenv("WSPF_CONFIG", writeConfig(t, c.json))
+			_, err := ResolveConfig()
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, c.wantErr)
+			}
+		})
 	}
 }

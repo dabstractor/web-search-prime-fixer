@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Foundation Pivot — config schema extension, SDK integration, infrastructure extraction, v1 deletion",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Extend config.go to the new v2 schema (11 fields) with new validation. Add the official Go MCP SDK as the sole dependency. Extract the logger and health handler into their own files (logger.go, health.go). Mount mcp.NewStreamableHTTPHandler as the catch-all route in main.go (no-op tool set, no tools registered yet). Delete the v1 proxy.go, sse.go, rewrite.go and their six test files. Update surviving tests (config_test.go, resolve_test.go, health_test.go) for the new schema. Boot + /healthz green. See PRD §21 step 1.",
           "tasks": [
             {
@@ -110,14 +110,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Update surviving tests for the new schema and handler",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Rewrite config_test.go and resolve_test.go for the new 11-field Config schema and new validation rules. Update health_test.go (logStartup field assertions + routing test using the new SDK handler). logger_test.go should pass unchanged since logger behavior is identical.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Rewrite config_test.go, resolve_test.go, and health_test.go for v2 schema",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2",
@@ -155,7 +155,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Core extraction types + scalar/string/array precedence (levels 1-3)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"

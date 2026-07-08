@@ -82,8 +82,10 @@ func TestHealthHandler_RejectsNonGET(t *testing.T) {
 	}
 }
 
-// (d) logStartup emits one info/startup line with the four config fields and NO
-// authorization field (PRD §15 "Never logs credentials").
+// (d) logStartup emits one info/startup line with the v2 config fields and NO
+// authorization field (PRD §15 "Never logs credentials"). v2 fields: tools,
+// canonical_tool, query_aliases (as JSON arrays / scalar), listen, upstream,
+// log_level.
 func TestLogStartup(t *testing.T) {
 	var buf bytes.Buffer
 	l := newLogger(&buf, "info")
@@ -106,17 +108,33 @@ func TestLogStartup(t *testing.T) {
 	if m["msg"] != "startup" {
 		t.Errorf("msg = %#v, want startup", m["msg"])
 	}
-	// aliases is a JSON array matching cfg.Aliases ([]any after decode).
-	aliases, ok := m["aliases"].([]any)
+	// tools is a JSON array matching cfg.Tools ([]any after decode).
+	tools, ok := m["tools"].([]any)
 	if !ok {
-		t.Fatalf("aliases = %#v, want a JSON array", m["aliases"])
+		t.Fatalf("tools = %#v, want a JSON array", m["tools"])
 	}
-	want := make([]any, len(cfg.Aliases))
-	for i, a := range cfg.Aliases {
-		want[i] = a
+	wantTools := make([]any, len(cfg.Tools))
+	for i, tt := range cfg.Tools {
+		wantTools[i] = tt
 	}
-	if !reflect.DeepEqual(aliases, want) {
-		t.Errorf("aliases = %#v, want %#v", aliases, want)
+	if !reflect.DeepEqual(tools, wantTools) {
+		t.Errorf("tools = %#v, want %#v", tools, wantTools)
+	}
+	// canonical_tool is the canonical tool name string.
+	if m["canonical_tool"] != cfg.CanonicalTool {
+		t.Errorf("canonical_tool = %#v, want %q", m["canonical_tool"], cfg.CanonicalTool)
+	}
+	// query_aliases is a JSON array matching cfg.QueryAliases ([]any after decode).
+	aliases, ok := m["query_aliases"].([]any)
+	if !ok {
+		t.Fatalf("query_aliases = %#v, want a JSON array", m["query_aliases"])
+	}
+	wantAliases := make([]any, len(cfg.QueryAliases))
+	for i, a := range cfg.QueryAliases {
+		wantAliases[i] = a
+	}
+	if !reflect.DeepEqual(aliases, wantAliases) {
+		t.Errorf("query_aliases = %#v, want %#v", aliases, wantAliases)
 	}
 	if m["listen"] != cfg.Listen {
 		t.Errorf("listen = %#v, want %q", m["listen"], cfg.Listen)
@@ -133,22 +151,23 @@ func TestLogStartup(t *testing.T) {
 	}
 }
 
-// (e) Routing table (PRD §9): only /healthz is intercepted; it NEVER calls the
-// upstream (PRD §16/§19.3 case 5). Built via the SAME mux main() builds. The
-// "/mcp forwards" half is covered by proxy_test.go.
+// (e) Routing (PRD §16/§9): /healthz routes to the local healthHandler and NEVER
+// falls through to the catch-all. main() mounts the SDK StreamableHTTPHandler at
+// "/"; this test substitutes a SENTINEL catch-all (decoupled from the SDK — the
+// SDK integration is exercised by server_test.go in P1.M5.T3) that fails if hit,
+// proving /healthz isolation. The /healthz body {"ok":true,...} also proves it
+// reached healthHandler, not the catch-all.
 func TestRouting_HealthzOnly(t *testing.T) {
-	hits := 0
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer up.Close()
+	catchAllHit := false
+	catchAll := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		catchAllHit = true
+		w.WriteHeader(http.StatusNotFound)
+	})
 
-	cfg := DefaultConfig()
-	cfg.Upstream = up.URL
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("/", newProxyHandler(cfg, newLogger(io.Discard, "error"), newUpstreamClient()))
+	mux.Handle("/", catchAll) // sentinel stands in for the SDK handler at "/"
+
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
@@ -168,7 +187,7 @@ func TestRouting_HealthzOnly(t *testing.T) {
 	if m["ok"] != true {
 		t.Errorf("/healthz body ok = %#v, want true (routed to healthHandler)", m["ok"])
 	}
-	if hits != 0 {
-		t.Errorf("upstream hit %d times for /healthz, want 0 (isolation)", hits)
+	if catchAllHit {
+		t.Error("/healthz fell through to the catch-all; want isolated routing to healthHandler")
 	}
 }
