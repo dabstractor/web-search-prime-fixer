@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,6 +21,7 @@ type fakeState struct {
 	calls    int32 // atomic count of tools/call handled
 	lastTool string
 	lastArgs map[string]any
+	lastAuth string // S2: the Authorization header the fake z.ai received (verbatim-forward proof)
 }
 
 // newFakeZAI stands up a REAL MCP server ("fake-zai") over httptest that advertises
@@ -45,7 +48,16 @@ func newFakeZAI(t *testing.T) (*httptest.Server, *fakeState) {
 		}}, nil
 	})
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return zai }, nil)
-	srv := httptest.NewServer(h)
+	// S2: record the inbound Authorization the fake z.ai RECEIVES (initialize POST,
+	// tools/call POST, and SSE GET all pass through here) so tests can assert the
+	// UpstreamClient forwarded the client's header verbatim (PRD §17, FR-7).
+	recording := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		st.mu.Lock()
+		st.lastAuth = r.Header.Get("Authorization")
+		st.mu.Unlock()
+		h.ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(recording)
 	t.Cleanup(srv.Close)
 	return srv, st
 }
@@ -56,17 +68,132 @@ func testCtx(t *testing.T) (context.Context, context.CancelFunc) {
 }
 
 // TestNewUpstreamHTTPClient pins PRD §11.2: ResponseHeaderTimeout==30s, Timeout==0.
+// S2: the client's Transport is now an *authInjector whose base is the *http.Transport.
 func TestNewUpstreamHTTPClient(t *testing.T) {
 	c := newUpstreamHTTPClient()
-	tr, ok := c.Transport.(*http.Transport)
+	ai, ok := c.Transport.(*authInjector)
 	if !ok {
-		t.Fatalf("Transport is %T, want *http.Transport", c.Transport)
+		t.Fatalf("Transport is %T, want *authInjector", c.Transport)
+	}
+	tr, ok := ai.base.(*http.Transport)
+	if !ok {
+		t.Fatalf("authInjector.base is %T, want *http.Transport", ai.base)
 	}
 	if tr.ResponseHeaderTimeout != 30*time.Second {
-		t.Errorf("ResponseHeaderTimeout = %v, want 30s", tr.ResponseHeaderTimeout)
+		t.Errorf("base ResponseHeaderTimeout = %v, want 30s", tr.ResponseHeaderTimeout)
 	}
 	if c.Timeout != 0 {
 		t.Errorf("Client.Timeout = %v, want 0 (no hard deadline — PRD §11.2)", c.Timeout)
+	}
+}
+
+// recordingTripper is a base http.RoundTripper for unit-testing authInjector: it
+// captures the outbound request (after authInjector has injected the header) and
+// returns a trivial 200 with no body.
+type recordingTripper struct {
+	got *http.Request
+}
+
+func (r *recordingTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.got = req
+	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
+}
+
+// TestAuthInjector_ContextThreading unit-tests the RoundTripper: auth present →
+// Authorization set verbatim on the base's request; auth absent → header left unset
+// (never fabricate). Proves PRD §17/FR-7 verbatim-forward without the full MCP stack.
+func TestAuthInjector_ContextThreading(t *testing.T) {
+	t.Run("auth present is set verbatim", func(t *testing.T) {
+		rec := &recordingTripper{}
+		ai := &authInjector{base: rec}
+		req := httptest.NewRequest(http.MethodPost, "https://z.ai/mcp", nil)
+		req = req.WithContext(context.WithValue(req.Context(), authHeaderKey{}, "Bearer secret-xyz"))
+		if _, err := ai.RoundTrip(req); err != nil {
+			t.Fatalf("RoundTrip: %v", err)
+		}
+		if got := rec.got.Header.Get("Authorization"); got != "Bearer secret-xyz" {
+			t.Errorf("Authorization = %q, want %q (verbatim)", got, "Bearer secret-xyz")
+		}
+	})
+	t.Run("auth absent leaves header unset", func(t *testing.T) {
+		rec := &recordingTripper{}
+		ai := &authInjector{base: rec}
+		req := httptest.NewRequest(http.MethodPost, "https://z.ai/mcp", nil) // no authHeaderKey
+		if _, err := ai.RoundTrip(req); err != nil {
+			t.Fatalf("RoundTrip: %v", err)
+		}
+		if got := rec.got.Header.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q, want empty (never fabricate)", got)
+		}
+	})
+}
+
+// TestUpstreamClient_AuthForwarded: a callTool whose ctx carries authHeaderKey makes
+// the auth-recording fake z.ai observe that EXACT Authorization value (PRD §17, FR-7).
+func TestUpstreamClient_AuthForwarded(t *testing.T) {
+	srv, st := newFakeZAI(t)
+	u := &UpstreamClient{upstream: srv.URL, targetTool: "web_search_prime", targetParam: "search_query"}
+
+	ctx, cancel := testCtx(t)
+	defer cancel()
+	const secret = "Bearer test-key-123"
+	ctx = context.WithValue(ctx, authHeaderKey{}, secret)
+
+	if _, err := u.callTool(ctx, map[string]any{"search_query": "lunar rover"}); err != nil {
+		t.Fatalf("callTool: %v", err)
+	}
+	defer func() { _ = u.session.Close() }()
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.lastAuth != secret {
+		t.Errorf("fake z.ai received Authorization %q, want %q (verbatim forward — PRD §17, FR-7)",
+			st.lastAuth, secret)
+	}
+}
+
+// TestUpstreamClient_AuthNotRetained enforces PRD §17 "never store": after a call
+// made with a known secret, NO credential-named field exists on UpstreamClient and
+// NO existing string field holds the secret value.
+//
+// NOTE on reflect: UpstreamClient's fields are ALL unexported (mu/session/upstream/
+// targetTool/targetParam), so reflect Value.Interface()/CanInterface() CANNOT read
+// their values (CanInterface()==false for all of them; Interface() would panic). A
+// naive reflect value-walk therefore skips every field and passes trivially. We
+// enforce "never stored" two ways that DO work from the same package:
+//
+//	(1) reflect over field NAMES only (no value read, no panic) -> assert no field is
+//	    named like a credential (catches a future regression that ADDS an auth field).
+//	(2) direct same-package access of the known string fields -> assert none holds the
+//	    secret value (catches storing it in an existing field).
+func TestUpstreamClient_AuthNotRetained(t *testing.T) {
+	srv, _ := newFakeZAI(t)
+	u := &UpstreamClient{upstream: srv.URL, targetTool: "web_search_prime", targetParam: "search_query"}
+
+	ctx, cancel := testCtx(t)
+	defer cancel()
+	const secret = "Bearer never-stored-456"
+	ctx = context.WithValue(ctx, authHeaderKey{}, secret)
+	if _, err := u.callTool(ctx, map[string]any{"search_query": "x"}); err != nil {
+		t.Fatalf("callTool: %v", err)
+	}
+	defer func() { _ = u.session.Close() }()
+
+	// (1) No credential-named field exists on UpstreamClient (PRD §17: hold no key).
+	denied := map[string]bool{
+		"auth": true, "authheader": true, "authorization": true,
+		"key": true, "apikey": true, "credential": true, "token": true,
+	}
+	rt := reflect.TypeOf(UpstreamClient{})
+	for i := 0; i < rt.NumField(); i++ {
+		if denied[strings.ToLower(rt.Field(i).Name)] {
+			t.Errorf("UpstreamClient has credential-named field %q — PRD §17 forbids storing auth",
+				rt.Field(i).Name)
+		}
+	}
+	// (2) The existing string fields do not retain the secret value (same-package access).
+	if u.upstream == secret || u.targetTool == secret || u.targetParam == secret {
+		t.Errorf("a UpstreamClient string field retained the credential (%q) — PRD §17 forbids storing it", secret)
 	}
 }
 

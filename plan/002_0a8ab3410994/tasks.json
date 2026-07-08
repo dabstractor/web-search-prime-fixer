@@ -278,14 +278,14 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Upstream Delegation (upstream.go + upstream_test.go)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Implement the MCP client to z.ai via the SDK's StreamableClientTransport. One lazily-initialized shared session, reused across calls, re-initialized on session-expiry. Auth header threaded from the inbound request via context + RoundTripper. One CallTool per inbound call. Errors surfaced honestly.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Upstream MCP client (upstream.go)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The z.ai MCP client: lazy session, auth threading, CallTool delegation, session-expiry re-init. Built on the SDK's client API.",
               "subtasks": [
                 {
@@ -314,7 +314,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Authorization header threading via context + RoundTripper (PRD §11.1, §17, FR-7)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S1"
@@ -333,7 +333,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S3",
                   "title": "Session-expiry re-init + honest error surfacing + result handling (PRD §11.1, §11.2, §11.3)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S2"
