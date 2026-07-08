@@ -77,6 +77,13 @@ func main() {
 	// for defaults. version is the health.go package var ("dev", or set via -ldflags).
 	server := mcp.NewServer(&mcp.Implementation{Name: "web-search-prime-fixer", Version: version}, nil)
 
+	// P1.M5.T2: advertise the tools (buildTools) on the SDK server, each wired to the
+	// shared extract→delegate→teach dispatch handler (PRD §5.2, §11.3). The UpstreamClient
+	// owns the lazy shared z.ai session; its outbound Authorization is threaded via ctx
+	// (authMiddleware → authHeaderKey → authInjector), so the handler just forwards ctx.
+	upstream := newUpstreamClient(cfg, log)
+	registerTools(server, cfg, upstream, log)
+
 	// [Mode A] The SDK's StreamableHTTPHandler OWNS all MCP transport framing —
 	// initialize handshake, Mcp-Session-Id lifecycle, SSE framing, JSON-RPC dispatch,
 	// and tools/list / tools/call routing (PRD §13, FR-1). We hand it the same

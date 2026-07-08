@@ -398,14 +398,14 @@
               "type": "Task",
               "id": "P1.M5.T2",
               "title": "Server dispatch wiring (server.go)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Register the advertised tools via AddTool and implement the dispatch handler that ties the pipeline together: extract query → (if no query, return immediate warning) → delegate to z.ai → append warning after results if non-canonical. Wire auth from context to the upstream client.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T2.S1",
                   "title": "Register tools via AddTool + wire the extract→delegate→teach dispatch handler (PRD §5.2, §11.3)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T1.S1",
@@ -439,14 +439,14 @@
               "type": "Task",
               "id": "P1.M5.T3",
               "title": "End-to-end tests (server_test.go)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "End-to-end tests via the SDK's in-memory transport or httptest with a fake z.ai that records the tools/call it receives. Covers all PRD §19.3 cases: canonical call, alias/junk, bare/nested/array, empty object, tools/list assertion, session-expiry re-init.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T3.S1",
                   "title": "E2E test harness + all PRD §19.3 cases (canonical, alias/junk, bare/nested/array, empty, tools/list, session-expiry)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T2.S1"
@@ -477,7 +477,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T4.S1",
                   "title": "Rewrite README.md for the normalizing MCP server + Part A client config (PRD §20, §14)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2",
