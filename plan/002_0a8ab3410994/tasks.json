@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "v2.0 Normalizing MCP Server — full architectural pivot from transparent proxy",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Rewrite web-search-prime-fixer from a transparent byte-forwarding proxy (v1, which failed in production) to a real MCP server built on the official Go MCP SDK. The server advertises one tool (web_search), extracts a search query from arbitrary agent input, delegates one clean call to z.ai's web_search_prime, and appends a teaching warning after results when usage was non-canonical. The v1 proxy/sse/rewrite code is deleted; config/logger/health infrastructure is reused and extended. See plan/002_0a8ab3410994/architecture/ for verified SDK API surface, codebase patterns, and system context.",
       "milestones": [
         {
@@ -360,7 +360,7 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Server Wiring, End-to-End Tests, Quality Gate, and Documentation Sweep",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Define the advertised tools (tools.go) with permissive schemas, wire the server dispatch handler (server.go) that ties extract→delegate→teach together, write end-to-end tests (server_test.go) with a fake z.ai, run the quality gate (go vet/test/build), and sync all changeset-level documentation (README, config.example.json, doc.go).",
           "tasks": [
             {
@@ -470,7 +470,7 @@
               "type": "Task",
               "id": "P1.M5.T4",
               "title": "Sync changeset-level documentation (Mode B) + quality gate",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Final changeset-level documentation sweep: rewrite README.md for the normalizing MCP server, update config.example.json to the v2 schema, rewrite doc.go package comment. Run the quality gate: go vet, go test, go build all clean. This task depends on every implementing subtask and runs last.",
               "subtasks": [
                 {
@@ -532,7 +532,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T4.S3",
                   "title": "Quality gate: go vet ./... + go test ./... + go build clean; confirm single SDK require",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T4.S1",
