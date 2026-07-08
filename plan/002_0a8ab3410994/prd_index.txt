@@ -1,0 +1,61 @@
+h1.0 web-search-prime-fixer — Design Doc
+ h2.0 0. What changed since the first revision
+ h2.1 1. Problem (revised, with evidence)
+  h3.0 1.1 Layer 1 — the wrong tool NAME is rejected before any network hop
+  h3.1 1.2 Layer 2 — the wrong parameter NAME and the wrong SCHEMA
+  h3.2 1.3 What the first revision got wrong
+ h2.2 2. Goal
+ h2.3 3. Non-goals (revised)
+ h2.4 4. Users and context
+ h2.5 5. Solution overview (two parts)
+  h3.3 5.1 Part A — client unlock: bare tool names
+  h3.4 5.2 Part B — server rewrite: a normalizing MCP server
+ h2.6 6. Functional requirements
+  h3.5 FR-1 MCP server (Streamable HTTP), built on the Go MCP SDK
+  h3.6 FR-2 One advertised tool (plus optional alias names)
+  h3.7 FR-3 Permissive schema (so the client never rejects locally)
+  h3.8 FR-4 Extract a query from ANY input
+  h3.9 FR-5 Upstream delegation
+  h3.10 FR-6 Teaching signal — a warning, appended after results, never instead of them
+  h3.11 FR-7 Credentials forwarded, not owned
+  h3.12 FR-8 Configuration
+ h2.7 7. Non-functional requirements
+ h2.8 8. Verified transport contract (z.ai upstream)
+ h2.9 9. Advertised tools and context minimization
+  h3.13 9.1 The hard constraint
+  h3.14 9.2 Why one tool is enough now
+  h3.15 9.3 Default and rules
+  h3.16 9.4 Canonical surface (what we document and teach)
+ h2.10 10. Query extraction (extract.go)
+  h3.17 10.1 Precedence
+  h3.18 10.2 Optional-parameter normalization
+  h3.19 10.3 What we send to z.ai
+  h3.20 10.4 Extraction source is logged and surfaced
+ h2.11 11. Upstream delegation (upstream.go)
+  h3.21 11.1 Session lifecycle
+  h3.22 11.2 Timeouts and cancellation
+  h3.23 11.3 Result handling
+ h2.12 12. Teaching signal (teach.go)
+  h3.24 12.1 When a warning is added
+  h3.25 12.2 Warning text (with example)
+  h3.26 12.3 Why appended, and why results must accompany the warning
+ h2.13 13. MCP SDK (decided: adopt the official SDK)
+ h2.14 14. Architecture and file layout
+ h2.15 15. Logging
+ h2.16 16. Health and operations
+ h2.17 17. Headers, credentials, security
+ h2.18 18. Configuration (config.go)
+  h3.27 18.1 Schema
+  h3.28 18.2 Defaults
+  h3.29 18.3 Discovery and precedence
+ h2.19 19. Test plan
+  h3.30 19.1 extract_test.go
+  h3.31 19.2 teach_test.go
+  h3.32 19.3 server_test.go (end-to-end)
+  h3.33 19.4 Golden fixtures
+ h2.20 20. Client configuration (the Part A unlock)
+ h2.21 21. Implementation order
+ h2.22 22. Success criteria
+ h2.23 23. Open decisions (minor shipped-defaults)
+---
+code:7 para:57 list:24 table:2
