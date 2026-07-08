@@ -292,7 +292,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Upstream client struct + lazy shared session init via SDK client",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S2"
@@ -314,7 +314,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Authorization header threading via context + RoundTripper (PRD §11.1, §17, FR-7)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S1"
