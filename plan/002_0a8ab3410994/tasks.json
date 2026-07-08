@@ -219,14 +219,14 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Teaching Signal (teach.go + teach_test.go)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Implement the canonical-pair detection rule, the warning text generation (with correct-usage example), and the append-after-results / immediate-no-results logic (PRD §12). isError is NEVER set for any normalization or warning case.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Teaching signal functions (teach.go)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Determine whether a warning should be added (canonical call → no warning; anything else → warning), generate the warning text per PRD §12.2, and implement the append-after-results ordering and the immediate-no-results exception.",
               "subtasks": [
                 {
@@ -254,7 +254,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Append-after-results logic + immediate no-results warning + isError invariant (PRD §12.3)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -292,7 +292,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Upstream client struct + lazy shared session init via SDK client",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S2"

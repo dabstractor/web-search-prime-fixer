@@ -3,6 +3,8 @@ package main
 import (
 	"reflect"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Local decoupling constants mirror DefaultConfig() so teach_test.go stays
@@ -116,6 +118,101 @@ func TestNoQueryWarningText(t *testing.T) {
 			got := noQueryWarningText(tc.canonTool, tc.canonParam)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("noQueryWarningText =\n %q\nwant\n %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// contentTexts extracts the .Text fields from a []mcp.Content slice, assuming every
+// block is a *mcp.TextContent. It makes test failure messages readable and pins the
+// text-only assumption (it panics if a non-text block appears — desired in a test).
+func contentTexts(cs []mcp.Content) []string {
+	out := make([]string, len(cs))
+	for i, c := range cs {
+		out[i] = c.(*mcp.TextContent).Text
+	}
+	return out
+}
+
+func TestAppendWarning(t *testing.T) {
+	tests := []struct {
+		name        string
+		initial     []mcp.Content
+		appends     []string // texts to append (1 for normal rows, 2 for double_append)
+		wantContent []mcp.Content
+	}{
+		{
+			name:        "single_block",
+			initial:     []mcp.Content{&mcp.TextContent{Text: "result1"}},
+			appends:     []string{"WARN"},
+			wantContent: []mcp.Content{&mcp.TextContent{Text: "result1"}, &mcp.TextContent{Text: "WARN"}},
+		},
+		{
+			name:        "multi_block_ordering",
+			initial:     []mcp.Content{&mcp.TextContent{Text: "result1"}, &mcp.TextContent{Text: "result2"}},
+			appends:     []string{"WARN"},
+			wantContent: []mcp.Content{&mcp.TextContent{Text: "result1"}, &mcp.TextContent{Text: "result2"}, &mcp.TextContent{Text: "WARN"}},
+		},
+		{
+			name:        "append_to_empty",
+			initial:     nil,
+			appends:     []string{"WARN"},
+			wantContent: []mcp.Content{&mcp.TextContent{Text: "WARN"}},
+		},
+		{
+			name:        "double_append",
+			initial:     []mcp.Content{&mcp.TextContent{Text: "result1"}},
+			appends:     []string{"W1", "W2"},
+			wantContent: []mcp.Content{&mcp.TextContent{Text: "result1"}, &mcp.TextContent{Text: "W1"}, &mcp.TextContent{Text: "W2"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res := &mcp.CallToolResult{Content: tc.initial}
+			for _, text := range tc.appends {
+				appendWarning(res, text)
+			}
+			if !reflect.DeepEqual(res.Content, tc.wantContent) {
+				t.Errorf("appendWarning Content =\n %v\nwant\n %v", contentTexts(res.Content), contentTexts(tc.wantContent))
+			}
+			if res.IsError {
+				t.Errorf("appendWarning set IsError=true; must stay false")
+			}
+		})
+	}
+}
+
+func TestNoQueryResult(t *testing.T) {
+	tests := []struct {
+		name        string
+		text        string
+		wantContent []mcp.Content
+	}{
+		{
+			name:        "nonempty",
+			text:        "WARN TEXT",
+			wantContent: []mcp.Content{&mcp.TextContent{Text: "WARN TEXT"}},
+		},
+		{
+			name:        "empty_text_edge",
+			text:        "",
+			wantContent: []mcp.Content{&mcp.TextContent{Text: ""}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res := noQueryResult(tc.text)
+			if res == nil {
+				t.Fatalf("noQueryResult returned nil")
+			}
+			if !reflect.DeepEqual(res.Content, tc.wantContent) {
+				t.Errorf("noQueryResult Content =\n %v\nwant\n %v", contentTexts(res.Content), contentTexts(tc.wantContent))
+			}
+			if res.IsError {
+				t.Errorf("noQueryResult IsError=true; must be false")
+			}
+			if len(res.Content) != 1 {
+				t.Errorf("noQueryResult len(Content) = %d, want 1 (warning is the only content)", len(res.Content))
 			}
 		})
 	}
