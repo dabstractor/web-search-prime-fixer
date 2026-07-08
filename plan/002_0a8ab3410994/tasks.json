@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "v2.0 Normalizing MCP Server — full architectural pivot from transparent proxy",
-      "status": "Ready",
+      "status": "Planned",
       "description": "Rewrite web-search-prime-fixer from a transparent byte-forwarding proxy (v1, which failed in production) to a real MCP server built on the official Go MCP SDK. The server advertises one tool (web_search), extracts a search query from arbitrary agent input, delegates one clean call to z.ai's web_search_prime, and appends a teaching warning after results when usage was non-canonical. The v1 proxy/sse/rewrite code is deleted; config/logger/health infrastructure is reused and extended. See plan/002_0a8ab3410994/architecture/ for verified SDK API surface, codebase patterns, and system context.",
       "milestones": [
         {
@@ -18,28 +18,41 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Config schema extension (config.go)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Extend the Config struct from 6 fields to the new PRD §18.1 schema (11 fields), update DefaultConfig to the v2 defaults, and add new validation rules to ResolveConfig.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T1.S1",
                   "title": "Extend Config struct, DefaultConfig, and LoadConfig for the v2 schema",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.18", "h3.27", "h3.28", "h2.14", "h2.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From plan/002_0a8ab3410994/architecture/codebase_patterns.md §1 and §7: the existing Config has fields Upstream, Listen, Path, Aliases (JSON key \"aliases\"), TargetParam, LogLevel. The v2 schema replaces Aliases and adds 5 new fields. Go map iteration is randomized so QueryAliases must be an ordered SLICE walked in index order, never a map.\n2. INPUT: The existing config.go file in the repo (Config struct, DefaultConfig(), LoadConfig()). The new field list from PRD §18.1/§18.2.\n3. LOGIC: Replace the `Aliases []string` field (JSON key \"aliases\") with `QueryAliases []string` (JSON key \"query_aliases\"). Add new fields: `Tools []string` (JSON \"tools\"), `CanonicalTool string` (JSON \"canonical_tool\"), `CanonicalParam string` (JSON \"canonical_param\"), `OptionalAliases map[string][]string` (JSON \"optional_aliases\"), `TargetTool string` (JSON \"target_tool\"). Keep Upstream, Listen, Path, TargetParam, LogLevel unchanged. Update DefaultConfig() to return the v2 defaults verbatim from PRD §18.2: Tools=[\"web_search\"], CanonicalTool=\"web_search\", CanonicalParam=\"query\", QueryAliases=the 13-entry list, OptionalAliases=the 3-entry map, TargetTool=\"web_search_prime\", TargetParam=\"search_query\". LoadConfig() overlay logic (DefaultConfig base + json.Unmarshal) is unchanged — unknown fields ignored.\n4. OUTPUT: A Config struct matching PRD §18.1 exactly, with DefaultConfig returning all v2 defaults. Consumed by P1.M1.T1.S2 (validation) and P1.M1.T2.S1 (logStartup).\n5. DOCS: [Mode A] Update the doc comment on `type Config` to document every new field and note the breaking JSON-key rename `aliases` → `query_aliases`. This rides WITH the work."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From plan/002_0a8ab3410994/architecture/codebase_patterns.md §1 and §7: the existing Config has fields Upstream, Listen, Path, Aliases (JSON key \"aliases\"), TargetParam, LogLevel. The v2 schema replaces Aliases and adds 5 new fields. Go map iteration is randomized so QueryAliases must be an ordered SLICE walked in index order, never a map.\n2. INPUT: The existing config.go file in the repo (Config struct, DefaultConfig(), LoadConfig()). The new field list from PRD §18.1/§18.2.\n3. LOGIC: Replace the `Aliases []string` field (JSON key \"aliases\") with `QueryAliases []string` (JSON key \"query_aliases\"). Add new fields: `Tools []string` (JSON \"tools\"), `CanonicalTool string` (JSON \"canonical_tool\"), `CanonicalParam string` (JSON \"canonical_param\"), `OptionalAliases map[string][]string` (JSON \"optional_aliases\"), `TargetTool string` (JSON \"target_tool\"). Keep Upstream, Listen, Path, TargetParam, LogLevel unchanged. Update DefaultConfig() to return the v2 defaults verbatim from PRD §18.2: Tools=[\"web_search\"], CanonicalTool=\"web_search\", CanonicalParam=\"query\", QueryAliases=the 13-entry list, OptionalAliases=the 3-entry map, TargetTool=\"web_search_prime\", TargetParam=\"search_query\". LoadConfig() overlay logic (DefaultConfig base + json.Unmarshal) is unchanged — unknown fields ignored.\n4. OUTPUT: A Config struct matching PRD §18.1 exactly, with DefaultConfig returning all v2 defaults. Consumed by P1.M1.T1.S2 (validation) and P1.M1.T2.S1 (logStartup).\n5. DOCS: [Mode A] Update the doc comment on `type Config` to document every new field and note the breaking JSON-key rename `aliases` → `query_aliases`. This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.18",
+                    "h3.27",
+                    "h3.28",
+                    "h2.14",
+                    "h2.3"
+                  ]
                 },
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Extend ResolveConfig validation for new rules (Tools, CanonicalTool, TargetTool)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.18", "h3.29", "h3.15", "h2.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/codebase_patterns.md §1: the existing ResolveConfig validates Listen (net.SplitHostPort) and Upstream (url.Parse + IsAbs), applies env overrides (WSPF_UPSTREAM/LISTEN/LOG_LEVEL), and forces TargetParam if empty. Discovery logic (resolveConfigPath, WSPF_CONFIG/CWD/XDG) is UNCHANGED.\n2. INPUT: The extended Config struct from P1.M1.T1.S1. The existing ResolveConfig/resolveConfigPath/fileExists functions.\n3. LOGIC: Add three new validation rules to ResolveConfig AFTER the existing Listen/Upstream checks: (a) `Tools` is non-empty (len > 0); (b) `Tools` contains `CanonicalTool` as an entry; (c) no entry in `Tools` equals `TargetTool` (we must never advertise z.ai's real name \"web_search_prime\" — PRD §9.3, §18.3). On failure, return a clear wrapped error (fmt.Errorf). Keep the existing force-TargetParam-if-empty logic. Do NOT change discovery or env-override logic.\n4. OUTPUT: ResolveConfig() returns a fully-validated v2 Config or a clear error. Consumed by P1.M1.T2.S1 (main.go bootstrap) and downstream milestones.\n5. DOCS: [Mode A] Update the doc comment on ResolveConfig to document the three new validation rules. This rides WITH the work."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/codebase_patterns.md §1: the existing ResolveConfig validates Listen (net.SplitHostPort) and Upstream (url.Parse + IsAbs), applies env overrides (WSPF_UPSTREAM/LISTEN/LOG_LEVEL), and forces TargetParam if empty. Discovery logic (resolveConfigPath, WSPF_CONFIG/CWD/XDG) is UNCHANGED.\n2. INPUT: The extended Config struct from P1.M1.T1.S1. The existing ResolveConfig/resolveConfigPath/fileExists functions.\n3. LOGIC: Add three new validation rules to ResolveConfig AFTER the existing Listen/Upstream checks: (a) `Tools` is non-empty (len > 0); (b) `Tools` contains `CanonicalTool` as an entry; (c) no entry in `Tools` equals `TargetTool` (we must never advertise z.ai's real name \"web_search_prime\" — PRD §9.3, §18.3). On failure, return a clear wrapped error (fmt.Errorf). Keep the existing force-TargetParam-if-empty logic. Do NOT change discovery or env-override logic.\n4. OUTPUT: ResolveConfig() returns a fully-validated v2 Config or a clear error. Consumed by P1.M1.T2.S1 (main.go bootstrap) and downstream milestones.\n5. DOCS: [Mode A] Update the doc comment on ResolveConfig to document the three new validation rules. This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.18",
+                    "h3.29",
+                    "h3.15",
+                    "h2.3"
+                  ]
                 }
               ]
             },
@@ -54,11 +67,20 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Add SDK dependency; extract logger→logger.go and health→health.go; update logStartup",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.13", "h3.5", "h2.14", "h2.15", "h2.16", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md: the import path is `github.com/modelcontextprotocol/go-sdk/mcp`; SDK v1.6.1 is in the local module cache so `go mod tidy` needs no network. From architecture/codebase_patterns.md §2/§3: the logger struct, newLogger, log method, redactHeaders, level consts, healthHandler, and var version are all currently in main.go.\n2. INPUT: The existing main.go (logger, healthHandler, version, logStartup). The updated Config struct from P1.M1.T1.S1.\n3. LOGIC: (a) Add `require github.com/modelcontextprotocol/go-sdk v1.6.1` to go.mod and run `go mod tidy` to generate go.sum. (b) Create logger.go: move `type logger struct`, `newLogger`, `(*logger).log`, `redactHeaders`, and the level consts/levelNum from main.go. Behavior unchanged. (c) Create health.go: move `var version`, `healthHandler` from main.go. Behavior unchanged. (d) Update `logStartup` in main.go to emit the v2 config fields: `tools` (cfg.Tools as JSON array), `canonical_tool`, `query_aliases` (cfg.QueryAliases as JSON array) — replacing the old `aliases` field. Keep listen, upstream, log_level. Never credentials.\n4. OUTPUT: Three files — logger.go, health.go, trimmed main.go — plus go.mod/go.sum with the SDK. Consumed by P1.M1.T2.S2 (mount handler).\n5. DOCS: [Mode A] Add a one-line comment in go.mod noting the SDK is the sole external dependency (PRD §7/§13). This rides WITH the work."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md: the import path is `github.com/modelcontextprotocol/go-sdk/mcp`; SDK v1.6.1 is in the local module cache so `go mod tidy` needs no network. From architecture/codebase_patterns.md §2/§3: the logger struct, newLogger, log method, redactHeaders, level consts, healthHandler, and var version are all currently in main.go.\n2. INPUT: The existing main.go (logger, healthHandler, version, logStartup). The updated Config struct from P1.M1.T1.S1.\n3. LOGIC: (a) Add `require github.com/modelcontextprotocol/go-sdk v1.6.1` to go.mod and run `go mod tidy` to generate go.sum. (b) Create logger.go: move `type logger struct`, `newLogger`, `(*logger).log`, `redactHeaders`, and the level consts/levelNum from main.go. Behavior unchanged. (c) Create health.go: move `var version`, `healthHandler` from main.go. Behavior unchanged. (d) Update `logStartup` in main.go to emit the v2 config fields: `tools` (cfg.Tools as JSON array), `canonical_tool`, `query_aliases` (cfg.QueryAliases as JSON array) — replacing the old `aliases` field. Keep listen, upstream, log_level. Never credentials.\n4. OUTPUT: Three files — logger.go, health.go, trimmed main.go — plus go.mod/go.sum with the SDK. Consumed by P1.M1.T2.S2 (mount handler).\n5. DOCS: [Mode A] Add a one-line comment in go.mod noting the SDK is the sole external dependency (PRD §7/§13). This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.13",
+                    "h3.5",
+                    "h2.14",
+                    "h2.15",
+                    "h2.16",
+                    "h2.7"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -66,9 +88,21 @@
                   "title": "Mount SDK StreamableHTTPHandler in main.go; delete v1 proxy/sse/rewrite + tests",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M1.T2.S1"],
-                  "prd_selectors": ["h2.5", "h3.3", "h3.4", "h3.5", "h2.13", "h2.14", "h2.17", "h2.16", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §1: `mcp.NewServer(&mcp.Implementation{Name, Version}, *mcp.ServerOptions) *mcp.Server`. `mcp.NewStreamableHTTPHandler(getServer func(*http.Request) *mcp.Server, opts *mcp.StreamableHTTPOptions) *mcp.StreamableHTTPHandler` implements http.Handler. CRITICAL (streamable.go:491-494): ServeHTTP passes req.Context() into server.Connect, so middleware-injected context values reach tool handlers. From architecture/system_context.md: v1 files to delete are proxy.go, sse.go, rewrite.go + proxy_test.go, proxy_e2e_test.go, proxy_harness_test.go, proxy_log_test.go, sse_test.go, rewrite_test.go.\n2. INPUT: logger.go, health.go, go.mod with SDK (from P1.M1.T2.S1). The updated Config (from P1.M1.T1.S2).\n3. LOGIC: Rewrite main(): after ResolveConfig + newLogger + logStartup, create `server := mcp.NewServer(&mcp.Implementation{Name: \"web-search-prime-fixer\", Version: version}, nil)`. Create `sdkHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server { return server }, nil)`. Wrap sdkHandler with auth-extraction middleware: an http.HandlerFunc that reads `r.Header.Get(\"Authorization\")`, stores it in the request context via context.WithValue (using a package-private context key type), then calls `sdkHandler.ServeHTTP(w, r.WithContext(ctx))`. Mount on the mux: `/healthz` → healthHandler; `/` → the wrapped SDK handler. Keep the graceful-shutdown goroutine unchanged. NO tools registered yet (AddTool calls come in P1.M5.T2). DELETE: proxy.go, sse.go, rewrite.go and the six matching test files. Verify: `go build` succeeds; `go run` boots; `GET /healthz` returns 200 {\"ok\":true,\"version\":\"dev\"}. The SDK handler will respond to initialize/tools-list (empty list since no tools) — that is expected for this milestone.\n4. OUTPUT: A bootable binary with the SDK handler mounted, auth middleware stub in place, v1 proxy code deleted. Consumed by P1.M1.T3.S1 (test updates) and P1.M5 (tool registration).\n5. DOCS: [Mode A] Add a comment on the handler-mount in main.go noting the SDK owns transport framing (initialize/Mcp-Session-Id/SSE/dispatch) per PRD §13. This rides WITH the work."
+                  "dependencies": [
+                    "P1.M1.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §1: `mcp.NewServer(&mcp.Implementation{Name, Version}, *mcp.ServerOptions) *mcp.Server`. `mcp.NewStreamableHTTPHandler(getServer func(*http.Request) *mcp.Server, opts *mcp.StreamableHTTPOptions) *mcp.StreamableHTTPHandler` implements http.Handler. CRITICAL (streamable.go:491-494): ServeHTTP passes req.Context() into server.Connect, so middleware-injected context values reach tool handlers. From architecture/system_context.md: v1 files to delete are proxy.go, sse.go, rewrite.go + proxy_test.go, proxy_e2e_test.go, proxy_harness_test.go, proxy_log_test.go, sse_test.go, rewrite_test.go.\n2. INPUT: logger.go, health.go, go.mod with SDK (from P1.M1.T2.S1). The updated Config (from P1.M1.T1.S2).\n3. LOGIC: Rewrite main(): after ResolveConfig + newLogger + logStartup, create `server := mcp.NewServer(&mcp.Implementation{Name: \"web-search-prime-fixer\", Version: version}, nil)`. Create `sdkHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server { return server }, nil)`. Wrap sdkHandler with auth-extraction middleware: an http.HandlerFunc that reads `r.Header.Get(\"Authorization\")`, stores it in the request context via context.WithValue (using a package-private context key type), then calls `sdkHandler.ServeHTTP(w, r.WithContext(ctx))`. Mount on the mux: `/healthz` → healthHandler; `/` → the wrapped SDK handler. Keep the graceful-shutdown goroutine unchanged. NO tools registered yet (AddTool calls come in P1.M5.T2). DELETE: proxy.go, sse.go, rewrite.go and the six matching test files. Verify: `go build` succeeds; `go run` boots; `GET /healthz` returns 200 {\"ok\":true,\"version\":\"dev\"}. The SDK handler will respond to initialize/tools-list (empty list since no tools) — that is expected for this milestone.\n4. OUTPUT: A bootable binary with the SDK handler mounted, auth middleware stub in place, v1 proxy code deleted. Consumed by P1.M1.T3.S1 (test updates) and P1.M5 (tool registration).\n5. DOCS: [Mode A] Add a comment on the handler-mount in main.go noting the SDK owns transport framing (initialize/Mcp-Session-Id/SSE/dispatch) per PRD §13. This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h3.3",
+                    "h3.4",
+                    "h3.5",
+                    "h2.13",
+                    "h2.14",
+                    "h2.17",
+                    "h2.16",
+                    "h2.7"
+                  ]
                 }
               ]
             },
@@ -85,9 +119,19 @@
                   "title": "Rewrite config_test.go, resolve_test.go, and health_test.go for v2 schema",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S2", "P1.M1.T2.S2"],
-                  "prd_selectors": ["h2.18", "h3.27", "h3.28", "h3.29", "h2.15", "h2.16"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/codebase_patterns.md §1/§5: existing tests use reflect.DeepEqual against DefaultConfig(), table-driven t.Run subtests, and helpers isolateConfigEnv(t)/writeConfig(t,body) which are reusable. health_test.go TestLogStartup currently asserts m[\"aliases\"] — must change to v2 fields. health_test.go TestRouting_HealthzOnly currently builds a mux with newProxyHandler (deleted) — must use the new SDK handler.\n2. INPUT: The new config.go (P1.M1.T1.S1/S2), new main.go with SDK handler (P1.M1.T2.S2). The existing config_test.go, resolve_test.go, health_test.go, logger_test.go.\n3. LOGIC: (a) config_test.go: rewrite TestDefaultConfig to reflect.DeepEqual against the v2 11-field DefaultConfig (Tools, CanonicalTool, CanonicalParam, QueryAliases 13 entries, OptionalAliases 3 entries, TargetTool, TargetParam, etc.). Update TestLoadConfig_FromFile table cases to use v2 JSON keys (query_aliases, tools, optional_aliases, etc.). (b) resolve_test.go: add validation test cases — Tools empty → error; Tools missing CanonicalTool → error; Tools contains TargetTool → error. Reuse isolateConfigEnv/writeConfig helpers. (c) health_test.go: update TestLogStartup to assert m[\"tools\"], m[\"canonical_tool\"], m[\"query_aliases\"] instead of m[\"aliases\"]. Update TestRouting_HealthzOnly to build the mux with the new SDK handler (or simplify to just test /healthz routing without the catch-all proxy). (d) logger_test.go: should pass unchanged — verify it does.\n4. OUTPUT: `go test ./...` green for all surviving test files. This is the M1 definition-of-done gate.\n5. DOCS: none — no user-facing/config/API surface change (test-only)."
+                  "dependencies": [
+                    "P1.M1.T1.S2",
+                    "P1.M1.T2.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/codebase_patterns.md §1/§5: existing tests use reflect.DeepEqual against DefaultConfig(), table-driven t.Run subtests, and helpers isolateConfigEnv(t)/writeConfig(t,body) which are reusable. health_test.go TestLogStartup currently asserts m[\"aliases\"] — must change to v2 fields. health_test.go TestRouting_HealthzOnly currently builds a mux with newProxyHandler (deleted) — must use the new SDK handler.\n2. INPUT: The new config.go (P1.M1.T1.S1/S2), new main.go with SDK handler (P1.M1.T2.S2). The existing config_test.go, resolve_test.go, health_test.go, logger_test.go.\n3. LOGIC: (a) config_test.go: rewrite TestDefaultConfig to reflect.DeepEqual against the v2 11-field DefaultConfig (Tools, CanonicalTool, CanonicalParam, QueryAliases 13 entries, OptionalAliases 3 entries, TargetTool, TargetParam, etc.). Update TestLoadConfig_FromFile table cases to use v2 JSON keys (query_aliases, tools, optional_aliases, etc.). (b) resolve_test.go: add validation test cases — Tools empty → error; Tools missing CanonicalTool → error; Tools contains TargetTool → error. Reuse isolateConfigEnv/writeConfig helpers. (c) health_test.go: update TestLogStartup to assert m[\"tools\"], m[\"canonical_tool\"], m[\"query_aliases\"] instead of m[\"aliases\"]. Update TestRouting_HealthzOnly to build the mux with the new SDK handler (or simplify to just test /healthz routing without the catch-all proxy). (d) logger_test.go: should pass unchanged — verify it does.\n4. OUTPUT: `go test ./...` green for all surviving test files. This is the M1 definition-of-done gate.\n5. DOCS: none — no user-facing/config/API surface change (test-only).",
+                  "prd_selectors": [
+                    "h2.18",
+                    "h3.27",
+                    "h3.28",
+                    "h3.29",
+                    "h2.15",
+                    "h2.16"
+                  ]
                 }
               ]
             }
@@ -113,9 +157,19 @@
                   "title": "Core extraction types + scalar/string/array precedence (levels 1-3)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.10", "h3.17", "h3.19", "h3.20", "h3.8", "h2.19", "h3.30"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §1: the tool handler receives `req.Params.Arguments` as `json.RawMessage` (raw JSON bytes). The extraction function must first `json.Unmarshal(raw, &v any)` then dispatch on v's type. From architecture/external_deps.md §6 (session 001): Go map iteration is randomized, so alias scanning MUST walk the ordered QueryAliases SLICE by index, never range over the decoded map.\n2. INPUT: `raw json.RawMessage` (the tool arguments), `queryAliases []string` (config QueryAliases), `optionalAliases map[string][]string` (config OptionalAliases).\n3. LOGIC: Define `type ExtractionResult struct { Query string; Source string; Ambiguous bool; Optionals map[string]any; Found bool }`. Implement `func extract(raw json.RawMessage, queryAliases []string, optionalAliases map[string][]string) ExtractionResult`. Dispatch on the unmarshaled value: (1) string → Query=v, Source=\"bare-string\", Found=true; (2) number/bool → stringify via fmt.Sprint, Source=\"scalar\", Found=true; (3) []any → recurse extract on first element that yields Found=true, Source=\"array[0]\"; if none yields, fall through to failure. For nil/null input → Found=false. This subtask handles levels 1-3 only; object handling is in S2.\n4. OUTPUT: ExtractionResult for string/scalar/array inputs, with Found=false for nil/empty. The extract function signature and ExtractionResult type are consumed by S2 (object handling) and S3 (optionals + failure completion).\n5. DOCS: [Mode A] Doc comment on extract() documenting the precedence levels 1-3, the source labels, and that the function is pure/deterministic. This rides WITH the work."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §1: the tool handler receives `req.Params.Arguments` as `json.RawMessage` (raw JSON bytes). The extraction function must first `json.Unmarshal(raw, &v any)` then dispatch on v's type. From architecture/external_deps.md §6 (session 001): Go map iteration is randomized, so alias scanning MUST walk the ordered QueryAliases SLICE by index, never range over the decoded map.\n2. INPUT: `raw json.RawMessage` (the tool arguments), `queryAliases []string` (config QueryAliases), `optionalAliases map[string][]string` (config OptionalAliases).\n3. LOGIC: Define `type ExtractionResult struct { Query string; Source string; Ambiguous bool; Optionals map[string]any; Found bool }`. Implement `func extract(raw json.RawMessage, queryAliases []string, optionalAliases map[string][]string) ExtractionResult`. Dispatch on the unmarshaled value: (1) string → Query=v, Source=\"bare-string\", Found=true; (2) number/bool → stringify via fmt.Sprint, Source=\"scalar\", Found=true; (3) []any → recurse extract on first element that yields Found=true, Source=\"array[0]\"; if none yields, fall through to failure. For nil/null input → Found=false. This subtask handles levels 1-3 only; object handling is in S2.\n4. OUTPUT: ExtractionResult for string/scalar/array inputs, with Found=false for nil/empty. The extract function signature and ExtractionResult type are consumed by S2 (object handling) and S3 (optionals + failure completion).\n5. DOCS: [Mode A] Doc comment on extract() documenting the precedence levels 1-3, the source labels, and that the function is pure/deterministic. This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.10",
+                    "h3.17",
+                    "h3.19",
+                    "h3.20",
+                    "h3.8",
+                    "h2.19",
+                    "h3.30"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -123,9 +177,18 @@
                   "title": "Object alias scan with nested drill-in (level 4a)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T1.S1"],
-                  "prd_selectors": ["h2.10", "h3.17", "h3.20", "h3.8", "h2.19", "h3.30"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From PRD §10.1.4.1: walk the alias priority list in CONFIG ORDER (the QueryAliases slice). For the first present key, resolve its value to a string. If the value is itself an object/array, drill into sub-keys. This must be deterministic — iterate the alias slice, not the map.\n2. INPUT: The extract function and ExtractionResult type from P1.M2.T1.S1. The queryAliases slice.\n3. LOGIC: When the unmarshaled value is a map[string]any (the common case): walk queryAliases in index order. For the first key present in the map: (a) if its value is a string → use directly; (b) if number/bool → stringify (Source=\"scalar\"); (c) if it is a map or array → DRILL IN: look for sub-keys in priority order [text, value, content, query, q, data, input]; if one of those sub-keys has a string value, use it; else find the first reachable string inside the nested structure via recursive descent. Source label = \"nested:<key>\" (e.g. \"nested:input\", \"nested:query\"). Found=true. If NO alias key is present in the map, do NOT set Found here — fall through to S3's inference logic.\n4. OUTPUT: ExtractionResult with correct Query and Source=\"nested:<key>\" for alias/nested inputs. The extract function now handles levels 1-4a.\n5. DOCS: [Mode A] Doc comment update on extract() documenting the alias-scan precedence, the drill-in sub-key list, and the nested source label format. This rides WITH the work."
+                  "dependencies": [
+                    "P1.M2.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From PRD §10.1.4.1: walk the alias priority list in CONFIG ORDER (the QueryAliases slice). For the first present key, resolve its value to a string. If the value is itself an object/array, drill into sub-keys. This must be deterministic — iterate the alias slice, not the map.\n2. INPUT: The extract function and ExtractionResult type from P1.M2.T1.S1. The queryAliases slice.\n3. LOGIC: When the unmarshaled value is a map[string]any (the common case): walk queryAliases in index order. For the first key present in the map: (a) if its value is a string → use directly; (b) if number/bool → stringify (Source=\"scalar\"); (c) if it is a map or array → DRILL IN: look for sub-keys in priority order [text, value, content, query, q, data, input]; if one of those sub-keys has a string value, use it; else find the first reachable string inside the nested structure via recursive descent. Source label = \"nested:<key>\" (e.g. \"nested:input\", \"nested:query\"). Found=true. If NO alias key is present in the map, do NOT set Found here — fall through to S3's inference logic.\n4. OUTPUT: ExtractionResult with correct Query and Source=\"nested:<key>\" for alias/nested inputs. The extract function now handles levels 1-4a.\n5. DOCS: [Mode A] Doc comment update on extract() documenting the alias-scan precedence, the drill-in sub-key list, and the nested source label format. This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.10",
+                    "h3.17",
+                    "h3.20",
+                    "h3.8",
+                    "h2.19",
+                    "h3.30"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -133,9 +196,20 @@
                   "title": "Inference fallback, optional normalization, failure path, and clean payload (levels 4b, 5, §10.2-10.3)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T1.S2"],
-                  "prd_selectors": ["h2.10", "h3.17", "h3.18", "h3.19", "h3.20", "h3.8", "h2.19", "h3.30"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From PRD §10.1.4.2: when no alias matched, recursively collect every reachable string value EXCLUDING keys that are recognized optionals or their aliases. From PRD §10.2: optionals are location←[country,region], content_size←[size,contentSize,detail], search_recency_filter←[recency,freshness,time_filter,date_filter]. From PRD §10.3: the final payload sent to z.ai contains ONLY search_query + recognized optionals; everything else is dropped. From PRD §10.1.5: when no usable string exists anywhere, extraction FAILS (Found=false).\n2. INPUT: The extract function from P1.M2.T1.S2 (handles levels 1-4a). The optionalAliases map from config.\n3. LOGIC: Add three behaviors to complete extract(): (a) INFERENCE (level 4b): when the map has no alias key, recursively collect all reachable string values, EXCLUDING any key that is a recognized optional canonical name or one of its aliases. If exactly one candidate → Query=candidate, Source=\"inferred:<key>\", Found=true. If multiple → pick the LONGEST, Source=\"inferred:<key>\", Ambiguous=true. (b) OPTIONAL NORMALIZATION (§10.2): read optionals shallowly from the top-level object — for each canonical optional (location, content_size, search_recency_filter), check the top-level map for the canonical name OR any of its aliases; if found, store the value in Optionals under the CANONICAL name. (c) FAILURE (level 5): if no usable string was found anywhere ({}, null, array of non-strings, object with no strings), Found=false, Query=\"\", Optionals=nil. (d) CLEAN PAYLOAD HELPER: add `func (r ExtractionResult) ToUpstreamArgs(targetParam string) map[string]any` that returns {targetParam: r.Query} plus any normalized optionals — NOTHING else. This guarantees z.ai gets a schema-valid call.\n4. OUTPUT: The complete extract() function handling ALL PRD §10 cases, plus ToUpstreamArgs(). Consumed by P1.M3 (teaching: uses Source/Found) and P1.M4 (upstream: uses ToUpstreamArgs) and P1.M5.T2 (server: calls extract in the handler).\n5. DOCS: [Mode A] Doc comment on extract() documenting inference, the ambiguous flag, optional normalization, the failure path, and the \"drop everything not recognized\" guarantee (§10.3). Note that enum values are NOT validated (out of scope). This rides WITH the work."
+                  "dependencies": [
+                    "P1.M2.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From PRD §10.1.4.2: when no alias matched, recursively collect every reachable string value EXCLUDING keys that are recognized optionals or their aliases. From PRD §10.2: optionals are location←[country,region], content_size←[size,contentSize,detail], search_recency_filter←[recency,freshness,time_filter,date_filter]. From PRD §10.3: the final payload sent to z.ai contains ONLY search_query + recognized optionals; everything else is dropped. From PRD §10.1.5: when no usable string exists anywhere, extraction FAILS (Found=false).\n2. INPUT: The extract function from P1.M2.T1.S2 (handles levels 1-4a). The optionalAliases map from config.\n3. LOGIC: Add three behaviors to complete extract(): (a) INFERENCE (level 4b): when the map has no alias key, recursively collect all reachable string values, EXCLUDING any key that is a recognized optional canonical name or one of its aliases. If exactly one candidate → Query=candidate, Source=\"inferred:<key>\", Found=true. If multiple → pick the LONGEST, Source=\"inferred:<key>\", Ambiguous=true. (b) OPTIONAL NORMALIZATION (§10.2): read optionals shallowly from the top-level object — for each canonical optional (location, content_size, search_recency_filter), check the top-level map for the canonical name OR any of its aliases; if found, store the value in Optionals under the CANONICAL name. (c) FAILURE (level 5): if no usable string was found anywhere ({}, null, array of non-strings, object with no strings), Found=false, Query=\"\", Optionals=nil. (d) CLEAN PAYLOAD HELPER: add `func (r ExtractionResult) ToUpstreamArgs(targetParam string) map[string]any` that returns {targetParam: r.Query} plus any normalized optionals — NOTHING else. This guarantees z.ai gets a schema-valid call.\n4. OUTPUT: The complete extract() function handling ALL PRD §10 cases, plus ToUpstreamArgs(). Consumed by P1.M3 (teaching: uses Source/Found) and P1.M4 (upstream: uses ToUpstreamArgs) and P1.M5.T2 (server: calls extract in the handler).\n5. DOCS: [Mode A] Doc comment on extract() documenting inference, the ambiguous flag, optional normalization, the failure path, and the \"drop everything not recognized\" guarantee (§10.3). Note that enum values are NOT validated (out of scope). This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.10",
+                    "h3.17",
+                    "h3.18",
+                    "h3.19",
+                    "h3.20",
+                    "h3.8",
+                    "h2.19",
+                    "h3.30"
+                  ]
                 }
               ]
             }
@@ -161,9 +235,20 @@
                   "title": "Canonical-pair detection + warning text generation (PRD §12.1, §12.2)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T1.S3"],
-                  "prd_selectors": ["h2.12", "h3.24", "h3.25", "h3.26", "h3.10", "h3.16", "h2.19", "h3.31"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From PRD §12.1: NO warning when calledTool==\"web_search\" AND the query came from the \"query\" parameter (source==\"query\"). Warning otherwise (wrong tool, wrong param, nested/inferred/bare-string/array/scalar source, or normalized optionals present). From PRD §12.2: the warning text is a single line with a concrete correct-usage example.\n2. INPUT: ExtractionResult (from P1.M2.T1.S3 — has Source, Found, Optionals). The calledTool string. Config fields: CanonicalTool, CanonicalParam.\n3. LOGIC: Implement `func shouldWarn(calledTool string, result ExtractionResult, canonicalTool, canonicalParam string) bool` — returns false ONLY when calledTool==canonicalTool AND result.Source==canonicalParam (the source came from the canonical param key). Returns true for any other source, wrong tool name, or when len(result.Optionals)>0 (normalized optionals were forwarded). Implement `func warningText(calledTool string, source string, canonicalTool, canonicalParam string) string` — returns the after-results warning per PRD §12.2 verbatim: `[web-search-prime-fixer] Warning: this call used \"<tool>\"/\"<source>\" rather than the canonical form. Results are above. Next time call: <canonicalTool> with { \"<canonicalParam>\": \"...\" } — e.g. <canonicalTool>({ \"<canonicalParam>\": \"rust async runtime\" }).` Implement `func noQueryWarningText(canonicalTool, canonicalParam string) string` — returns the immediate no-results warning per PRD §12.2: `[web-search-prime-fixer] Warning: could not find a search query in the arguments; no search was run. Call: <canonicalTool> with { \"<canonicalParam>\": \"...\" } — e.g. <canonicalTool>({ \"<canonicalParam>\": \"rust async runtime\" }).`\n4. OUTPUT: shouldWarn bool, warningText string, noQueryWarningText string. Consumed by P1.M3.T1.S2 (append logic) and P1.M5.T2 (server handler).\n5. DOCS: [Mode A] Doc comment on shouldWarn/warningText/noQueryWarningText documenting the canonical-pair rule, the exact text format, and that source reflects ambiguous/inferred labels. This rides WITH the work."
+                  "dependencies": [
+                    "P1.M2.T1.S3"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From PRD §12.1: NO warning when calledTool==\"web_search\" AND the query came from the \"query\" parameter (source==\"query\"). Warning otherwise (wrong tool, wrong param, nested/inferred/bare-string/array/scalar source, or normalized optionals present). From PRD §12.2: the warning text is a single line with a concrete correct-usage example.\n2. INPUT: ExtractionResult (from P1.M2.T1.S3 — has Source, Found, Optionals). The calledTool string. Config fields: CanonicalTool, CanonicalParam.\n3. LOGIC: Implement `func shouldWarn(calledTool string, result ExtractionResult, canonicalTool, canonicalParam string) bool` — returns false ONLY when calledTool==canonicalTool AND result.Source==canonicalParam (the source came from the canonical param key). Returns true for any other source, wrong tool name, or when len(result.Optionals)>0 (normalized optionals were forwarded). Implement `func warningText(calledTool string, source string, canonicalTool, canonicalParam string) string` — returns the after-results warning per PRD §12.2 verbatim: `[web-search-prime-fixer] Warning: this call used \"<tool>\"/\"<source>\" rather than the canonical form. Results are above. Next time call: <canonicalTool> with { \"<canonicalParam>\": \"...\" } — e.g. <canonicalTool>({ \"<canonicalParam>\": \"rust async runtime\" }).` Implement `func noQueryWarningText(canonicalTool, canonicalParam string) string` — returns the immediate no-results warning per PRD §12.2: `[web-search-prime-fixer] Warning: could not find a search query in the arguments; no search was run. Call: <canonicalTool> with { \"<canonicalParam>\": \"...\" } — e.g. <canonicalTool>({ \"<canonicalParam>\": \"rust async runtime\" }).`\n4. OUTPUT: shouldWarn bool, warningText string, noQueryWarningText string. Consumed by P1.M3.T1.S2 (append logic) and P1.M5.T2 (server handler).\n5. DOCS: [Mode A] Doc comment on shouldWarn/warningText/noQueryWarningText documenting the canonical-pair rule, the exact text format, and that source reflects ambiguous/inferred labels. This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.12",
+                    "h3.24",
+                    "h3.25",
+                    "h3.26",
+                    "h3.10",
+                    "h3.16",
+                    "h2.19",
+                    "h3.31"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -171,9 +256,19 @@
                   "title": "Append-after-results logic + immediate no-results warning + isError invariant (PRD §12.3)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M3.T1.S1"],
-                  "prd_selectors": ["h2.12", "h3.24", "h3.25", "h3.26", "h3.10", "h2.19", "h3.31"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §3: CallToolResult.Content is []Content (interface). TextContent implements Content via &mcp.TextContent{Text: \"...\"}. To append: result.Content = append(result.Content, &mcp.TextContent{Text: warning}). CRITICAL: NEVER call result.SetError() — it sets IsError=true AND overwrites Content if empty (protocol.go:132). We build results manually with IsError left false (zero value).\n2. INPUT: shouldWarn/warningText/noQueryWarningText from P1.M3.T1.S1. The mcp.CallToolResult type from the SDK.\n3. LOGIC: Implement two functions: (a) `func appendWarning(result *mcp.CallToolResult, text string)` — appends &mcp.TextContent{Text: text} to result.Content AFTER the existing result content. Does NOT touch result.IsError (stays false). Does NOT replace or prepend any existing content. (b) `func noQueryResult(text string) *mcp.CallToolResult` — builds a fresh result with Content=[]Content{&mcp.TextContent{Text: text}} (the warning IS the only content) and IsError=false. This is returned when extraction found no query (no upstream call made). The ordering invariant: in the delegate flow, upstream results come first, warning appended last — so the model acts on results, not the warning.\n4. OUTPUT: appendWarning() and noQueryResult() functions. Consumed by P1.M5.T2 (server handler: calls appendWarning after upstream results, calls noQueryResult when extraction fails).\n5. DOCS: [Mode A] Doc comment on appendWarning/noQueryResult documenting the append-only ordering, the no-results exception, and that IsError is never set for any normalization/warning case. This rides WITH the work."
+                  "dependencies": [
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §3: CallToolResult.Content is []Content (interface). TextContent implements Content via &mcp.TextContent{Text: \"...\"}. To append: result.Content = append(result.Content, &mcp.TextContent{Text: warning}). CRITICAL: NEVER call result.SetError() — it sets IsError=true AND overwrites Content if empty (protocol.go:132). We build results manually with IsError left false (zero value).\n2. INPUT: shouldWarn/warningText/noQueryWarningText from P1.M3.T1.S1. The mcp.CallToolResult type from the SDK.\n3. LOGIC: Implement two functions: (a) `func appendWarning(result *mcp.CallToolResult, text string)` — appends &mcp.TextContent{Text: text} to result.Content AFTER the existing result content. Does NOT touch result.IsError (stays false). Does NOT replace or prepend any existing content. (b) `func noQueryResult(text string) *mcp.CallToolResult` — builds a fresh result with Content=[]Content{&mcp.TextContent{Text: text}} (the warning IS the only content) and IsError=false. This is returned when extraction found no query (no upstream call made). The ordering invariant: in the delegate flow, upstream results come first, warning appended last — so the model acts on results, not the warning.\n4. OUTPUT: appendWarning() and noQueryResult() functions. Consumed by P1.M5.T2 (server handler: calls appendWarning after upstream results, calls noQueryResult when extraction fails).\n5. DOCS: [Mode A] Doc comment on appendWarning/noQueryResult documenting the append-only ordering, the no-results exception, and that IsError is never set for any normalization/warning case. This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.12",
+                    "h3.24",
+                    "h3.25",
+                    "h3.26",
+                    "h3.10",
+                    "h2.19",
+                    "h3.31"
+                  ]
                 }
               ]
             }
@@ -199,9 +294,21 @@
                   "title": "Upstream client struct + lazy shared session init via SDK client",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M1.T2.S2"],
-                  "prd_selectors": ["h2.11", "h3.21", "h3.22", "h3.23", "h3.9", "h2.8", "h2.19", "h3.33", "h2.17"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §2: `mcp.NewClient(impl *Implementation, opts *ClientOptions) *Client`. `(*Client).Connect(ctx, t Transport, opts *ClientSessionOptions) (*ClientSession, error)` — performs the initialize handshake. `mcp.StreamableClientTransport{Endpoint string, HTTPClient *http.Client}`. `(*ClientSession).CallTool(ctx, *CallToolParams) (*CallToolResult, error)`. From PRD §11.1: one shared session, initialized lazily on first tools/call, guarded by a mutex. From architecture/external_deps.md §5 (session 001): do NOT set http.Client.Timeout (cuts off SSE body); use Transport.ResponseHeaderTimeout (~30s) instead.\n2. INPUT: cfg.Upstream (z.ai endpoint URL), cfg.TargetTool (\"web_search_prime\"), cfg.TargetParam (\"search_query\"). The auth header from the inbound request context (set by main.go middleware in P1.M1.T2.S2).\n3. LOGIC: Define `type UpstreamClient struct` with fields: mu sync.Mutex, session *mcp.ClientSession, upstream string, targetTool string, targetParam string. Implement `func (u *UpstreamClient) ensureSession(ctx context.Context) error` — if session is nil, build a `mcp.StreamableClientTransport{Endpoint: u.upstream, HTTPClient: <http.Client with ResponseHeaderTimeout>}`, create `mcp.NewClient(...)`, call `Connect(ctx, transport, nil)`, store the session. Guarded by mutex. Implement `func (u *UpstreamClient) callTool(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error)` — calls ensureSession, then `session.CallTool(ctx, &mcp.CallToolParams{Name: u.targetTool, Arguments: args})`, returns the result. The HTTPClient should have a Transport with ResponseHeaderTimeout=30s and NO Client.Timeout (so long SSE streams are not cut off).\n4. OUTPUT: UpstreamClient with ensureSession + callTool. The session is lazily initialized. Consumed by S2 (auth threading) and S3 (re-init) and P1.M5.T2 (server handler calls callTool).\n5. DOCS: [Mode A] Doc comment on UpstreamClient documenting the lazy-shared-session pattern, the mutex guarding, and the no-hard-timeout + ResponseHeaderTimeout rationale. This rides WITH the work."
+                  "dependencies": [
+                    "P1.M1.T2.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §2: `mcp.NewClient(impl *Implementation, opts *ClientOptions) *Client`. `(*Client).Connect(ctx, t Transport, opts *ClientSessionOptions) (*ClientSession, error)` — performs the initialize handshake. `mcp.StreamableClientTransport{Endpoint string, HTTPClient *http.Client}`. `(*ClientSession).CallTool(ctx, *CallToolParams) (*CallToolResult, error)`. From PRD §11.1: one shared session, initialized lazily on first tools/call, guarded by a mutex. From architecture/external_deps.md §5 (session 001): do NOT set http.Client.Timeout (cuts off SSE body); use Transport.ResponseHeaderTimeout (~30s) instead.\n2. INPUT: cfg.Upstream (z.ai endpoint URL), cfg.TargetTool (\"web_search_prime\"), cfg.TargetParam (\"search_query\"). The auth header from the inbound request context (set by main.go middleware in P1.M1.T2.S2).\n3. LOGIC: Define `type UpstreamClient struct` with fields: mu sync.Mutex, session *mcp.ClientSession, upstream string, targetTool string, targetParam string. Implement `func (u *UpstreamClient) ensureSession(ctx context.Context) error` — if session is nil, build a `mcp.StreamableClientTransport{Endpoint: u.upstream, HTTPClient: <http.Client with ResponseHeaderTimeout>}`, create `mcp.NewClient(...)`, call `Connect(ctx, transport, nil)`, store the session. Guarded by mutex. Implement `func (u *UpstreamClient) callTool(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error)` — calls ensureSession, then `session.CallTool(ctx, &mcp.CallToolParams{Name: u.targetTool, Arguments: args})`, returns the result. The HTTPClient should have a Transport with ResponseHeaderTimeout=30s and NO Client.Timeout (so long SSE streams are not cut off).\n4. OUTPUT: UpstreamClient with ensureSession + callTool. The session is lazily initialized. Consumed by S2 (auth threading) and S3 (re-init) and P1.M5.T2 (server handler calls callTool).\n5. DOCS: [Mode A] Doc comment on UpstreamClient documenting the lazy-shared-session pattern, the mutex guarding, and the no-hard-timeout + ResponseHeaderTimeout rationale. This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.11",
+                    "h3.21",
+                    "h3.22",
+                    "h3.23",
+                    "h3.9",
+                    "h2.8",
+                    "h2.19",
+                    "h3.33",
+                    "h2.17"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -209,9 +316,18 @@
                   "title": "Authorization header threading via context + RoundTripper (PRD §11.1, §17, FR-7)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T1.S1"],
-                  "prd_selectors": ["h2.11", "h3.21", "h3.11", "h2.17", "h2.15", "h3.9"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §6: the inbound client sends Authorization: Bearer <key>. We forward it verbatim to z.ai and never read/log/store it. The SDK preserves context values for auth middleware (streamable.go:223). The auth-middleware in main.go (P1.M1.T2.S2) stores the Authorization header in the request context; the tool handler reads it and passes it to the upstream client. From PRD §15/§17: Authorization is NEVER logged.\n2. INPUT: The UpstreamClient from P1.M4.T1.S1. The Authorization header string from the inbound request context.\n3. LOGIC: Define a package-private context key type (e.g. `type authKey struct{}`) and a helper `func authFromContext(ctx context.Context) string`. Add an `authHeader` field to UpstreamClient (or pass auth per-call). Implement an `authInjector` http.RoundTripper that wraps a base Transport: `func (a *authInjector) RoundTrip(req *http.Request) (*http.Response, error)` sets `req.Header.Set(\"Authorization\", a.auth)` (if non-empty) then delegates to `a.base.RoundTrip(req)`. Wire it: the StreamableClientTransport's HTTPClient uses `&http.Client{Transport: &authInjector{base: <transport with ResponseHeaderTimeout>, auth: <current auth>}}`. The auth value is set from the inbound request's Authorization header before each callTool. CRITICAL: the auth value is never passed to the logger; no log line references it. If the session must be rebuilt (S3), the new transport gets the current auth.\n4. OUTPUT: upstream calls to z.ai carry the client's Authorization header verbatim. Never logged. Consumed by S3 (re-init uses the same auth pattern) and P1.M5.T2 (handler reads auth from context, passes to upstream).\n5. DOCS: [Mode A] Doc comment on authInjector/authFromContext documenting the verbatim-forward rule, the never-log invariant, and the context-threading pattern. This rides WITH the work."
+                  "dependencies": [
+                    "P1.M4.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §6: the inbound client sends Authorization: Bearer <key>. We forward it verbatim to z.ai and never read/log/store it. The SDK preserves context values for auth middleware (streamable.go:223). The auth-middleware in main.go (P1.M1.T2.S2) stores the Authorization header in the request context; the tool handler reads it and passes it to the upstream client. From PRD §15/§17: Authorization is NEVER logged.\n2. INPUT: The UpstreamClient from P1.M4.T1.S1. The Authorization header string from the inbound request context.\n3. LOGIC: Define a package-private context key type (e.g. `type authKey struct{}`) and a helper `func authFromContext(ctx context.Context) string`. Add an `authHeader` field to UpstreamClient (or pass auth per-call). Implement an `authInjector` http.RoundTripper that wraps a base Transport: `func (a *authInjector) RoundTrip(req *http.Request) (*http.Response, error)` sets `req.Header.Set(\"Authorization\", a.auth)` (if non-empty) then delegates to `a.base.RoundTrip(req)`. Wire it: the StreamableClientTransport's HTTPClient uses `&http.Client{Transport: &authInjector{base: <transport with ResponseHeaderTimeout>, auth: <current auth>}}`. The auth value is set from the inbound request's Authorization header before each callTool. CRITICAL: the auth value is never passed to the logger; no log line references it. If the session must be rebuilt (S3), the new transport gets the current auth.\n4. OUTPUT: upstream calls to z.ai carry the client's Authorization header verbatim. Never logged. Consumed by S3 (re-init uses the same auth pattern) and P1.M5.T2 (handler reads auth from context, passes to upstream).\n5. DOCS: [Mode A] Doc comment on authInjector/authFromContext documenting the verbatim-forward rule, the never-log invariant, and the context-threading pattern. This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.11",
+                    "h3.21",
+                    "h3.11",
+                    "h2.17",
+                    "h2.15",
+                    "h3.9"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -219,9 +335,22 @@
                   "title": "Session-expiry re-init + honest error surfacing + result handling (PRD §11.1, §11.2, §11.3)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T1.S2"],
-                  "prd_selectors": ["h2.11", "h3.21", "h3.22", "h3.23", "h3.9", "h3.10", "h2.8", "h2.19", "h3.32", "h3.33"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From PRD §11.1: on a session-expiry signal from z.ai (404 / invalid-session), re-run initialize ONCE transparently and retry. If it still fails, surface the upstream error honestly (do NOT synthesize results). From PRD §11.2: the outbound request lifetime follows the client context (cancellation propagates); ResponseHeaderTimeout ~30s detects dead upstream. From PRD §11.3: read z.ai's CallTool result Content (the stringified-array text payload); preserve it intact when returning. From PRD §8: the result payload is a JSON-encoded STRING (stringified array), not an object — keep it intact.\n2. INPUT: The UpstreamClient with auth threading from P1.M4.T1.S2.\n3. LOGIC: Add session-expiry handling to callTool (or ensureSession): wrap the CallTool in a retry-once loop. If CallTool returns an error indicating session expiry (detect via error inspection — the SDK returns specific errors for 404/invalid session, or check for ErrSessionMissing), close the old session, re-run ensureSession (re-initialize with the current auth), and retry CallTool once. If the retry also fails, return the error honestly (do NOT synthesize a fake result). The result Content from z.ai is returned as-is (the tool handler in P1.M5.T2 will append the warning AFTER it). Log upstream errors via the logger's \"upstream_error\" event (called_tool, status, re-init attempts). The context from the inbound request propagates to z.ai via CallTool's ctx parameter, so client cancellation cancels the upstream call.\n4. OUTPUT: upstream.go fully functional — lazy session, auth threaded, re-init-once on expiry, one CallTool per inbound call, honest error surfacing. Consumed by P1.M5.T2 (server handler calls upstream.callTool, appends warning to its result).\n5. DOCS: [Mode A] Doc comment on the re-init-once logic, the honest-error rule (no synthesis), and the result-preservation note (stringified-array text payload kept intact). This rides WITH the work."
+                  "dependencies": [
+                    "P1.M4.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From PRD §11.1: on a session-expiry signal from z.ai (404 / invalid-session), re-run initialize ONCE transparently and retry. If it still fails, surface the upstream error honestly (do NOT synthesize results). From PRD §11.2: the outbound request lifetime follows the client context (cancellation propagates); ResponseHeaderTimeout ~30s detects dead upstream. From PRD §11.3: read z.ai's CallTool result Content (the stringified-array text payload); preserve it intact when returning. From PRD §8: the result payload is a JSON-encoded STRING (stringified array), not an object — keep it intact.\n2. INPUT: The UpstreamClient with auth threading from P1.M4.T1.S2.\n3. LOGIC: Add session-expiry handling to callTool (or ensureSession): wrap the CallTool in a retry-once loop. If CallTool returns an error indicating session expiry (detect via error inspection — the SDK returns specific errors for 404/invalid session, or check for ErrSessionMissing), close the old session, re-run ensureSession (re-initialize with the current auth), and retry CallTool once. If the retry also fails, return the error honestly (do NOT synthesize a fake result). The result Content from z.ai is returned as-is (the tool handler in P1.M5.T2 will append the warning AFTER it). Log upstream errors via the logger's \"upstream_error\" event (called_tool, status, re-init attempts). The context from the inbound request propagates to z.ai via CallTool's ctx parameter, so client cancellation cancels the upstream call.\n4. OUTPUT: upstream.go fully functional — lazy session, auth threaded, re-init-once on expiry, one CallTool per inbound call, honest error surfacing. Consumed by P1.M5.T2 (server handler calls upstream.callTool, appends warning to its result).\n5. DOCS: [Mode A] Doc comment on the re-init-once logic, the honest-error rule (no synthesis), and the result-preservation note (stringified-array text payload kept intact). This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.11",
+                    "h3.21",
+                    "h3.22",
+                    "h3.23",
+                    "h3.9",
+                    "h3.10",
+                    "h2.8",
+                    "h2.19",
+                    "h3.32",
+                    "h3.33"
+                  ]
                 }
               ]
             }
@@ -247,9 +376,21 @@
                   "title": "Canonical web_search tool + permissive schema + terse alias tool definitions (PRD §9)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S2"],
-                  "prd_selectors": ["h2.9", "h3.13", "h3.14", "h3.15", "h3.16", "h3.6", "h3.7", "h2.19", "h3.32"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §5: Tool.InputSchema must be non-nil with type \"object\" (AddTool panics otherwise). Use json.RawMessage for precise control of additionalProperties:true. From PRD §9.3: web_search carries the full description + documented schema; alias tools get a one-line description + minimal open schema. From PRD §9.4: canonical surface is web_search/query with optional location/content_size/search_recency_filter.\n2. INPUT: cfg.Tools (advertised names, Tools[0] is canonical), cfg.CanonicalTool, cfg.CanonicalParam, cfg.QueryAliases, cfg.OptionalAliases.\n3. LOGIC: Implement `func buildTools(cfg Config) []*mcp.Tool`. For Tools[0] (the canonical tool, must == CanonicalTool): build an mcp.Tool with Name=CanonicalTool, a full Description (per PRD §9.4 — \"Performs a web search via z.ai. Call with {\\\"query\\\": \\\"...\\\"}. Accepts alternative parameter names but canonical is query.\"), and InputSchema as json.RawMessage with type:object, properties declaring query (string, primary) + the common aliases as optional + the z.ai optionals, and additionalProperties:true (so the client never rejects any shape locally — PRD FR-3). For any Tools[1:] entries (optional aliases like \"search\"): build mcp.Tool with Name=<alias>, Description=\"Performs a web search; alias of web_search.\", InputSchema=json.RawMessage(`{\"type\":\"object\",\"additionalProperties\":true}`). NEVER include web_search_prime in the output (enforced by config validation in P1.M1.T1.S2).\n4. OUTPUT: []*mcp.Tool ready for server.AddTool registration. Consumed by P1.M5.T2.S1 (server wires them with AddTool).\n5. DOCS: [Mode A] Doc comment on buildTools documenting the canonical tool, the permissive-schema rationale (document not enforce — PRD FR-3), and the no-z.ai-names rule. This rides WITH the work."
+                  "dependencies": [
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §5: Tool.InputSchema must be non-nil with type \"object\" (AddTool panics otherwise). Use json.RawMessage for precise control of additionalProperties:true. From PRD §9.3: web_search carries the full description + documented schema; alias tools get a one-line description + minimal open schema. From PRD §9.4: canonical surface is web_search/query with optional location/content_size/search_recency_filter.\n2. INPUT: cfg.Tools (advertised names, Tools[0] is canonical), cfg.CanonicalTool, cfg.CanonicalParam, cfg.QueryAliases, cfg.OptionalAliases.\n3. LOGIC: Implement `func buildTools(cfg Config) []*mcp.Tool`. For Tools[0] (the canonical tool, must == CanonicalTool): build an mcp.Tool with Name=CanonicalTool, a full Description (per PRD §9.4 — \"Performs a web search via z.ai. Call with {\\\"query\\\": \\\"...\\\"}. Accepts alternative parameter names but canonical is query.\"), and InputSchema as json.RawMessage with type:object, properties declaring query (string, primary) + the common aliases as optional + the z.ai optionals, and additionalProperties:true (so the client never rejects any shape locally — PRD FR-3). For any Tools[1:] entries (optional aliases like \"search\"): build mcp.Tool with Name=<alias>, Description=\"Performs a web search; alias of web_search.\", InputSchema=json.RawMessage(`{\"type\":\"object\",\"additionalProperties\":true}`). NEVER include web_search_prime in the output (enforced by config validation in P1.M1.T1.S2).\n4. OUTPUT: []*mcp.Tool ready for server.AddTool registration. Consumed by P1.M5.T2.S1 (server wires them with AddTool).\n5. DOCS: [Mode A] Doc comment on buildTools documenting the canonical tool, the permissive-schema rationale (document not enforce — PRD FR-3), and the no-z.ai-names rule. This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.9",
+                    "h3.13",
+                    "h3.14",
+                    "h3.15",
+                    "h3.16",
+                    "h3.6",
+                    "h3.7",
+                    "h2.19",
+                    "h3.32"
+                  ]
                 }
               ]
             },
@@ -266,9 +407,31 @@
                   "title": "Register tools via AddTool + wire the extract→delegate→teach dispatch handler (PRD §5.2, §11.3)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M5.T1.S1", "P1.M2.T1.S3", "P1.M3.T1.S2", "P1.M4.T1.S3"],
-                  "prd_selectors": ["h2.5", "h3.4", "h3.5", "h3.8", "h3.9", "h3.10", "h2.11", "h3.23", "h2.12", "h3.24", "h2.9", "h3.15", "h2.15", "h2.6", "h2.19", "h3.32"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §1: `(*Server).AddTool(t *Tool, h ToolHandler)` where `ToolHandler func(context.Context, *CallToolRequest) (*CallToolResult, error)`. The handler receives req.Params.Arguments as json.RawMessage and req.Params.Name as the called tool name. The context carries the auth header (set by main.go middleware in P1.M1.T2.S2). From architecture/mcp_sdk_api.md §3: build results with []mcp.Content{&mcp.TextContent{Text: ...}}, never SetError.\n2. INPUT: Tool definitions from P1.M5.T1.S1 (buildTools). extract() from P1.M2.T1.S3. shouldWarn/appendWarning/noQueryResult from P1.M3.T1.S2. UpstreamClient.callTool from P1.M4.T1.S3.\n3. LOGIC: Implement `func registerTools(server *mcp.Server, cfg Config, upstream *UpstreamClient, log *logger)`. For each tool from buildTools(cfg), call `server.AddTool(tool, makeDispatchHandler(cfg, upstream, log))` — all tools share the SAME handler. The handler (a closure or method): (1) read `calledTool := req.Params.Name` and `rawArgs := req.Params.Arguments`. (2) `result := extract(rawArgs, cfg.QueryAliases, cfg.OptionalAliases)`. (3) Log a \"delegate\" event with called_tool, source, canonical, optionals. (4) If `!result.Found`: log \"extract_failed\" event, return `noQueryResult(noQueryWarningText(cfg.CanonicalTool, cfg.CanonicalParam))` — NO upstream call. (5) Else: `upstreamResult, err := upstream.callTool(ctx, result.ToUpstreamArgs(cfg.TargetParam))` — pass auth from context. (6) If err: log \"upstream_error\", return the error honestly (the SDK wraps it as a JSON-RPC error). (7) If `shouldWarn(calledTool, result, cfg.CanonicalTool, cfg.CanonicalParam)`: `appendWarning(upstreamResult, warningText(calledTool, result.Source, cfg.CanonicalTool, cfg.CanonicalParam))`. (8) Return upstreamResult. NEVER set IsError on the result for any normalization/warning case.\n4. OUTPUT: server.go with registerTools() and the dispatch handler. The server now has tools registered and the full pipeline wired. Consumed by P1.M5.T3.S1 (e2e tests) and main.go (calls registerTools after NewServer).\n5. DOCS: [Mode A] Doc comment on registerTools/makeDispatchHandler documenting the pipeline order (extract→delegate→teach), the no-results exception, the append-after ordering, and the IsError-never-set invariant. This rides WITH the work."
+                  "dependencies": [
+                    "P1.M5.T1.S1",
+                    "P1.M2.T1.S3",
+                    "P1.M3.T1.S2",
+                    "P1.M4.T1.S3"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §1: `(*Server).AddTool(t *Tool, h ToolHandler)` where `ToolHandler func(context.Context, *CallToolRequest) (*CallToolResult, error)`. The handler receives req.Params.Arguments as json.RawMessage and req.Params.Name as the called tool name. The context carries the auth header (set by main.go middleware in P1.M1.T2.S2). From architecture/mcp_sdk_api.md §3: build results with []mcp.Content{&mcp.TextContent{Text: ...}}, never SetError.\n2. INPUT: Tool definitions from P1.M5.T1.S1 (buildTools). extract() from P1.M2.T1.S3. shouldWarn/appendWarning/noQueryResult from P1.M3.T1.S2. UpstreamClient.callTool from P1.M4.T1.S3.\n3. LOGIC: Implement `func registerTools(server *mcp.Server, cfg Config, upstream *UpstreamClient, log *logger)`. For each tool from buildTools(cfg), call `server.AddTool(tool, makeDispatchHandler(cfg, upstream, log))` — all tools share the SAME handler. The handler (a closure or method): (1) read `calledTool := req.Params.Name` and `rawArgs := req.Params.Arguments`. (2) `result := extract(rawArgs, cfg.QueryAliases, cfg.OptionalAliases)`. (3) Log a \"delegate\" event with called_tool, source, canonical, optionals. (4) If `!result.Found`: log \"extract_failed\" event, return `noQueryResult(noQueryWarningText(cfg.CanonicalTool, cfg.CanonicalParam))` — NO upstream call. (5) Else: `upstreamResult, err := upstream.callTool(ctx, result.ToUpstreamArgs(cfg.TargetParam))` — pass auth from context. (6) If err: log \"upstream_error\", return the error honestly (the SDK wraps it as a JSON-RPC error). (7) If `shouldWarn(calledTool, result, cfg.CanonicalTool, cfg.CanonicalParam)`: `appendWarning(upstreamResult, warningText(calledTool, result.Source, cfg.CanonicalTool, cfg.CanonicalParam))`. (8) Return upstreamResult. NEVER set IsError on the result for any normalization/warning case.\n4. OUTPUT: server.go with registerTools() and the dispatch handler. The server now has tools registered and the full pipeline wired. Consumed by P1.M5.T3.S1 (e2e tests) and main.go (calls registerTools after NewServer).\n5. DOCS: [Mode A] Doc comment on registerTools/makeDispatchHandler documenting the pipeline order (extract→delegate→teach), the no-results exception, the append-after ordering, and the IsError-never-set invariant. This rides WITH the work.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h3.4",
+                    "h3.5",
+                    "h3.8",
+                    "h3.9",
+                    "h3.10",
+                    "h2.11",
+                    "h3.23",
+                    "h2.12",
+                    "h3.24",
+                    "h2.9",
+                    "h3.15",
+                    "h2.15",
+                    "h2.6",
+                    "h2.19",
+                    "h3.32"
+                  ]
                 }
               ]
             },
@@ -285,9 +448,21 @@
                   "title": "E2E test harness + all PRD §19.3 cases (canonical, alias/junk, bare/nested/array, empty, tools/list, session-expiry)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M5.T2.S1"],
-                  "prd_selectors": ["h2.19", "h3.32", "h3.33", "h3.8", "h3.9", "h3.10", "h2.9", "h3.15", "h2.22"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §4: `mcp.NewInMemoryTransports() (*InMemoryTransport, *InMemoryTransport)` returns a connected pair over net.Pipe — use one side for a fake z.ai server, the other for our upstream client. Alternatively, use httptest.NewServer with a fake MCP server for the upstream. For testing OUR server end-to-end: connect an SDK client to our server (via httptest or in-memory), send tools/call, assert the result. The fake z.ai records the CallToolParams it receives (Name, Arguments) so we can assert the upstream got a clean search_query call. From PRD §19.4: testdata/initialize.sse and testdata/tools_call.sse golden fixtures from v1 are reused as wire-format references.\n2. INPUT: The fully wired server from P1.M5.T2.S1 (registerTools + dispatch handler). The extract/teach/upstream modules. Existing testdata fixtures.\n3. LOGIC: Write server_test.go with a test harness that: (a) starts a fake z.ai MCP server (via NewInMemoryTransports or httptest) that records received CallToolParams and returns canned CallToolResult content. (b) builds our server with the fake upstream injected. (c) connects an SDK client to our server. Test cases per PRD §19.3: (1) web_search + {\"query\":\"x\"} → fake z.ai got web_search_prime/search_query exactly; client gets results, NO warning, IsError=false. (2) web_search + {\"q\":\"x\",\"junk\":1} → fake z.ai got clean search_query only (junk dropped); client gets results THEN warning appended. (3) web_search + bare-string/nested/array argument → extracted and forwarded; results + warning. (4) web_search + {} → NO upstream call made (assert fake z.ai got 0 calls); client gets immediate no-query warning, IsError=false. (5) tools/list → advertises exactly cfg.Tools; only web_search has full description; never web_search_prime. (6) upstream session-expiry → fake z.ai returns session-expiry on first call, then succeeds → one transparent re-init, then success. Assert auth header reached the fake z.ai and was never logged.\n4. OUTPUT: server_test.go with all PRD §19.3 cases green. This is a primary success-criteria gate (PRD §22).\n5. DOCS: none — test-only, no user-facing surface change."
+                  "dependencies": [
+                    "P1.M5.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/mcp_sdk_api.md §4: `mcp.NewInMemoryTransports() (*InMemoryTransport, *InMemoryTransport)` returns a connected pair over net.Pipe — use one side for a fake z.ai server, the other for our upstream client. Alternatively, use httptest.NewServer with a fake MCP server for the upstream. For testing OUR server end-to-end: connect an SDK client to our server (via httptest or in-memory), send tools/call, assert the result. The fake z.ai records the CallToolParams it receives (Name, Arguments) so we can assert the upstream got a clean search_query call. From PRD §19.4: testdata/initialize.sse and testdata/tools_call.sse golden fixtures from v1 are reused as wire-format references.\n2. INPUT: The fully wired server from P1.M5.T2.S1 (registerTools + dispatch handler). The extract/teach/upstream modules. Existing testdata fixtures.\n3. LOGIC: Write server_test.go with a test harness that: (a) starts a fake z.ai MCP server (via NewInMemoryTransports or httptest) that records received CallToolParams and returns canned CallToolResult content. (b) builds our server with the fake upstream injected. (c) connects an SDK client to our server. Test cases per PRD §19.3: (1) web_search + {\"query\":\"x\"} → fake z.ai got web_search_prime/search_query exactly; client gets results, NO warning, IsError=false. (2) web_search + {\"q\":\"x\",\"junk\":1} → fake z.ai got clean search_query only (junk dropped); client gets results THEN warning appended. (3) web_search + bare-string/nested/array argument → extracted and forwarded; results + warning. (4) web_search + {} → NO upstream call made (assert fake z.ai got 0 calls); client gets immediate no-query warning, IsError=false. (5) tools/list → advertises exactly cfg.Tools; only web_search has full description; never web_search_prime. (6) upstream session-expiry → fake z.ai returns session-expiry on first call, then succeeds → one transparent re-init, then success. Assert auth header reached the fake z.ai and was never logged.\n4. OUTPUT: server_test.go with all PRD §19.3 cases green. This is a primary success-criteria gate (PRD §22).\n5. DOCS: none — test-only, no user-facing surface change.",
+                  "prd_selectors": [
+                    "h2.19",
+                    "h3.32",
+                    "h3.33",
+                    "h3.8",
+                    "h3.9",
+                    "h3.10",
+                    "h2.9",
+                    "h3.15",
+                    "h2.22"
+                  ]
                 }
               ]
             },
@@ -304,9 +479,30 @@
                   "title": "Rewrite README.md for the normalizing MCP server + Part A client config (PRD §20, §14)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M1.T1.S2", "P1.M1.T2.S2", "P1.M2.T1.S3", "P1.M3.T1.S2", "P1.M4.T1.S3", "P1.M5.T2.S1", "P1.M5.T3.S1"],
-                  "prd_selectors": ["h2.20", "h2.14", "h2.0", "h2.2", "h2.3", "h2.9", "h3.16", "h2.12", "h2.18", "h2.16", "h2.13", "h2.22"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/system_context.md: the v1 README describes a transparent proxy that renames query→search_query — that framing is STALE and must be replaced entirely. From PRD §20: the Part A client config is ~/.pi/agent/mcp.json with settings.toolPrefix:\"none\" and the web_search server entry pointing at http://127.0.0.1:8787/mcp. From architecture/codebase_patterns.md §7: the JSON key aliases→query_aliases is a breaking config change that must be called out.\n2. INPUT: All implementing subtasks (the complete v2 behavior). The PRD §20 client config example.\n3. LOGIC: Rewrite README.md to describe: (a) what it is — a normalizing MCP server (NOT a proxy) that makes an agent's first web search attempt succeed. (b) the canonical surface: web_search / {\"query\":\"...\"}. (c) the Part A client config — the ~/.pi/agent/mcp.json with settings.toolPrefix:\"none\" and the mcpServers.web_search entry (PRD §20, verbatim JSON block). (d) the append-after-results warning-with-example the agent sees when it strays from canonical. (e) the new config fields + env vars, calling out the aliases→query_aliases BREAKING CHANGE. (f) the SDK build (go mod tidy / go build). (g) /healthz. (h) the revised non-goals (PRD §3). Replace all v1 proxy framing.\n4. OUTPUT: README.md fully rewritten for v2. No stale proxy references remain.\n5. DOCS: [Mode B] This IS the changeset-level documentation task for README.md. Depends on all implementing subtasks."
+                  "dependencies": [
+                    "P1.M1.T1.S2",
+                    "P1.M1.T2.S2",
+                    "P1.M2.T1.S3",
+                    "P1.M3.T1.S2",
+                    "P1.M4.T1.S3",
+                    "P1.M5.T2.S1",
+                    "P1.M5.T3.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/system_context.md: the v1 README describes a transparent proxy that renames query→search_query — that framing is STALE and must be replaced entirely. From PRD §20: the Part A client config is ~/.pi/agent/mcp.json with settings.toolPrefix:\"none\" and the web_search server entry pointing at http://127.0.0.1:8787/mcp. From architecture/codebase_patterns.md §7: the JSON key aliases→query_aliases is a breaking config change that must be called out.\n2. INPUT: All implementing subtasks (the complete v2 behavior). The PRD §20 client config example.\n3. LOGIC: Rewrite README.md to describe: (a) what it is — a normalizing MCP server (NOT a proxy) that makes an agent's first web search attempt succeed. (b) the canonical surface: web_search / {\"query\":\"...\"}. (c) the Part A client config — the ~/.pi/agent/mcp.json with settings.toolPrefix:\"none\" and the mcpServers.web_search entry (PRD §20, verbatim JSON block). (d) the append-after-results warning-with-example the agent sees when it strays from canonical. (e) the new config fields + env vars, calling out the aliases→query_aliases BREAKING CHANGE. (f) the SDK build (go mod tidy / go build). (g) /healthz. (h) the revised non-goals (PRD §3). Replace all v1 proxy framing.\n4. OUTPUT: README.md fully rewritten for v2. No stale proxy references remain.\n5. DOCS: [Mode B] This IS the changeset-level documentation task for README.md. Depends on all implementing subtasks.",
+                  "prd_selectors": [
+                    "h2.20",
+                    "h2.14",
+                    "h2.0",
+                    "h2.2",
+                    "h2.3",
+                    "h2.9",
+                    "h3.16",
+                    "h2.12",
+                    "h2.18",
+                    "h2.16",
+                    "h2.13",
+                    "h2.22"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -314,9 +510,23 @@
                   "title": "Update config.example.json to v2 schema + rewrite doc.go package comment",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1", "P1.M5.T2.S1"],
-                  "prd_selectors": ["h2.18", "h3.27", "h3.28", "h2.14", "h2.0", "h2.3", "h2.9", "h2.5", "h3.4", "h2.12"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/codebase_patterns.md §7: the v1 config.example.json uses the old schema (aliases, target_param only). The v2 schema has 11 fields per PRD §18.1/§18.2. From architecture/system_context.md: the v1 doc.go describes a transparent proxy with do-not-normalize non-goals — that framing is STALE.\n2. INPUT: The v2 Config struct and DefaultConfig from P1.M1.T1.S1. The complete v2 architecture from P1.M5.T2.S1.\n3. LOGIC: (a) config.example.json: rewrite to the full v2 schema matching DefaultConfig() exactly — upstream, listen, path, tools ([\"web_search\"]), canonical_tool, canonical_param, query_aliases (13 entries), optional_aliases (3-entry map), target_tool, target_param, log_level. Valid JSON, no comments. (b) doc.go: rewrite the package comment to describe the normalizing MCP server — one tool (web_search), query extraction from arbitrary input, delegation to z.ai, append-after-results teaching signal, and the revised non-goals (PRD §0/§3/§9). Remove all transparent-proxy and do-not-normalize language.\n4. OUTPUT: Updated config.example.json (v2 schema) and rewritten doc.go.\n5. DOCS: [Mode B] This IS the changeset-level documentation task for config.example.json and doc.go."
+                  "dependencies": [
+                    "P1.M1.T1.S1",
+                    "P1.M5.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From architecture/codebase_patterns.md §7: the v1 config.example.json uses the old schema (aliases, target_param only). The v2 schema has 11 fields per PRD §18.1/§18.2. From architecture/system_context.md: the v1 doc.go describes a transparent proxy with do-not-normalize non-goals — that framing is STALE.\n2. INPUT: The v2 Config struct and DefaultConfig from P1.M1.T1.S1. The complete v2 architecture from P1.M5.T2.S1.\n3. LOGIC: (a) config.example.json: rewrite to the full v2 schema matching DefaultConfig() exactly — upstream, listen, path, tools ([\"web_search\"]), canonical_tool, canonical_param, query_aliases (13 entries), optional_aliases (3-entry map), target_tool, target_param, log_level. Valid JSON, no comments. (b) doc.go: rewrite the package comment to describe the normalizing MCP server — one tool (web_search), query extraction from arbitrary input, delegation to z.ai, append-after-results teaching signal, and the revised non-goals (PRD §0/§3/§9). Remove all transparent-proxy and do-not-normalize language.\n4. OUTPUT: Updated config.example.json (v2 schema) and rewritten doc.go.\n5. DOCS: [Mode B] This IS the changeset-level documentation task for config.example.json and doc.go.",
+                  "prd_selectors": [
+                    "h2.18",
+                    "h3.27",
+                    "h3.28",
+                    "h2.14",
+                    "h2.0",
+                    "h2.3",
+                    "h2.9",
+                    "h2.5",
+                    "h3.4",
+                    "h2.12"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -324,9 +534,17 @@
                   "title": "Quality gate: go vet ./... + go test ./... + go build clean; confirm single SDK require",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M5.T4.S1", "P1.M5.T4.S2"],
-                  "prd_selectors": ["h2.21", "h2.22", "h2.7", "h2.13"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From PRD §21 step 8 and §22: the final gate is `go vet ./...` and `go test ./...` clean. From PRD §7/§13: the sole external dependency is the Go MCP SDK — confirm go.mod has exactly one require.\n2. INPUT: All code and tests from all milestones and tasks.\n3. LOGIC: Run `go vet ./...` (must be clean — no warnings). Run `go test ./...` (must be clean — all tests pass, including extract_test.go, teach_test.go, upstream_test.go, server_test.go, config_test.go, resolve_test.go, health_test.go, logger_test.go). Run `go build` (must produce the binary). Inspect go.mod: confirm exactly one `require` line (github.com/modelcontextprotocol/go-sdk). Verify no v1 proxy/sse/rewrite files remain. Verify the binary boots and /healthz returns 200. If any check fails, document the failure for remediation.\n4. OUTPUT: A clean quality-gate pass. This is the final definition-of-done for the entire phase (PRD §22 success criteria).\n5. DOCS: none — verification-only, no documentation surface change."
+                  "dependencies": [
+                    "P1.M5.T4.S1",
+                    "P1.M5.T4.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: From PRD §21 step 8 and §22: the final gate is `go vet ./...` and `go test ./...` clean. From PRD §7/§13: the sole external dependency is the Go MCP SDK — confirm go.mod has exactly one require.\n2. INPUT: All code and tests from all milestones and tasks.\n3. LOGIC: Run `go vet ./...` (must be clean — no warnings). Run `go test ./...` (must be clean — all tests pass, including extract_test.go, teach_test.go, upstream_test.go, server_test.go, config_test.go, resolve_test.go, health_test.go, logger_test.go). Run `go build` (must produce the binary). Inspect go.mod: confirm exactly one `require` line (github.com/modelcontextprotocol/go-sdk). Verify no v1 proxy/sse/rewrite files remain. Verify the binary boots and /healthz returns 200. If any check fails, document the failure for remediation.\n4. OUTPUT: A clean quality-gate pass. This is the final definition-of-done for the entire phase (PRD §22 success criteria).\n5. DOCS: none — verification-only, no documentation surface change.",
+                  "prd_selectors": [
+                    "h2.21",
+                    "h2.22",
+                    "h2.7",
+                    "h2.13"
+                  ]
                 }
               ]
             }

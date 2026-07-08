@@ -9,13 +9,22 @@ import (
 	"path/filepath"
 )
 
-// Config is the resolved configuration for the web-search-prime-fixer proxy.
+// Config is the resolved configuration for the web-search-prime-fixer
+// normalizing MCP server (v2 schema, PRD §18.1).
 //
 // Fields are populated by overlaying a JSON config file onto the built-in
 // defaults (see DefaultConfig and LoadConfig). Every field has a snake_case JSON
-// key used when reading a config file (PRD §14.1 "JSON form").
+// key used when reading a config file.
+//
+// BREAKING v2 change: the v1 field Aliases (JSON key "aliases") was renamed to
+// QueryAliases (JSON key "query_aliases"); the []string semantics are unchanged.
+// Operators with a v1 config file must rename the key "aliases" -> "query_aliases"
+// (documented in the README). Five fields are new in v2: Tools, CanonicalTool,
+// CanonicalParam, OptionalAliases, TargetTool.
+//
+// Field order matches PRD §18.1 verbatim.
 type Config struct {
-	// Upstream is the z.ai MCP endpoint the proxy forwards to.
+	// Upstream is the z.ai MCP endpoint the server delegates to.
 	// JSON key: "upstream".
 	Upstream string `json:"upstream"`
 
@@ -23,18 +32,43 @@ type Config struct {
 	// JSON key: "listen".
 	Listen string `json:"listen"`
 
-	// Path is reserved (informational; default "/mcp"). The proxy forwards all
-	// non-/healthz paths to Upstream regardless of this value.
+	// Path is reserved (informational; default "/mcp").
 	// JSON key: "path".
 	Path string `json:"path"`
 
-	// Aliases is the ordered list of argument keys renamed to TargetParam when
-	// present in a tools/call request. Order matters: the first present alias is
-	// promoted when the target is absent.
-	// JSON key: "aliases".
-	Aliases []string `json:"aliases"`
+	// Tools is the list of advertised tool names; Tools[0] is the canonical tool.
+	// Must be non-empty and contain CanonicalTool; must never contain TargetTool.
+	// JSON key: "tools".
+	Tools []string `json:"tools"`
 
-	// TargetParam is the canonical parameter aliases are renamed to
+	// CanonicalTool is the tool name the server teaches (default "web_search").
+	// Must be present in Tools.
+	// JSON key: "canonical_tool".
+	CanonicalTool string `json:"canonical_tool"`
+
+	// CanonicalParam is the parameter name the server teaches (default "query").
+	// JSON key: "canonical_param".
+	CanonicalParam string `json:"canonical_param"`
+
+	// QueryAliases is the ordered query-extraction key priority list. It MUST be a
+	// slice, never a map: extraction walks it in INDEX ORDER (first present key
+	// wins) and Go map iteration is randomized. (v1 field: Aliases, key "aliases".)
+	// JSON key: "query_aliases".
+	QueryAliases []string `json:"query_aliases"`
+
+	// OptionalAliases maps each z.ai canonical optional parameter to the
+	// client-facing alias names normalized into it. Each top-level key is an
+	// independent parameter (map order irrelevant); each per-key slice is the
+	// alias priority order for that parameter.
+	// JSON key: "optional_aliases".
+	OptionalAliases map[string][]string `json:"optional_aliases"`
+
+	// TargetTool is the z.ai tool to call (always "web_search_prime"); never
+	// advertised to clients.
+	// JSON key: "target_tool".
+	TargetTool string `json:"target_tool"`
+
+	// TargetParam is the z.ai canonical parameter sent upstream
 	// (always "search_query").
 	// JSON key: "target_param".
 	TargetParam string `json:"target_param"`
@@ -44,17 +78,31 @@ type Config struct {
 	LogLevel string `json:"log_level"`
 }
 
-// DefaultConfig returns the built-in default configuration (PRD §14.2, verbatim).
+// DefaultConfig returns the built-in default configuration (PRD §18.2, verbatim).
 //
-// The proxy runs with no config file at all by starting from these defaults;
+// The server runs with no config file at all by starting from these defaults;
 // LoadConfig("") yields this exact value, and LoadConfig(path) overlays a file's
-// JSON on top of it, overriding only the fields the file names.
+// JSON on top of it, overriding only the fields the file names (unknown fields
+// ignored). Field order matches the struct / PRD §18.1.
 func DefaultConfig() Config {
 	return Config{
-		Upstream:    "https://api.z.ai/api/mcp/web_search_prime/mcp",
-		Listen:      "127.0.0.1:8787",
-		Path:        "/mcp",
-		Aliases:     []string{"query", "q", "search", "searchQuery", "search_term"},
+		Upstream:       "https://api.z.ai/api/mcp/web_search_prime/mcp",
+		Listen:         "127.0.0.1:8787",
+		Path:           "/mcp",
+		Tools:          []string{"web_search"},
+		CanonicalTool:  "web_search",
+		CanonicalParam: "query",
+		QueryAliases: []string{
+			"query", "search_query", "q", "search", "searchQuery",
+			"search_term", "term", "text", "input", "prompt",
+			"question", "keywords", "topic", "searchString",
+		},
+		OptionalAliases: map[string][]string{
+			"location":              {"country", "region"},
+			"content_size":          {"size", "contentSize", "detail"},
+			"search_recency_filter": {"recency", "freshness", "time_filter", "date_filter"},
+		},
+		TargetTool:  "web_search_prime",
 		TargetParam: "search_query",
 		LogLevel:    "info",
 	}
