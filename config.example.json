@@ -2,13 +2,33 @@
   "upstream": "https://api.z.ai/api/mcp/web_search_prime/mcp",
   "listen": "127.0.0.1:8787",
   "path": "/mcp",
-  "aliases": [
+  "tools": [
+    "web_search"
+  ],
+  "canonical_tool": "web_search",
+  "canonical_param": "query",
+  "query_aliases": [
     "query",
+    "search_query",
     "q",
     "search",
     "searchQuery",
-    "search_term"
+    "search_term",
+    "term",
+    "text",
+    "input",
+    "prompt",
+    "question",
+    "keywords",
+    "topic",
+    "searchString"
   ],
+  "optional_aliases": {
+    "location": ["country", "region"],
+    "content_size": ["size", "contentSize", "detail"],
+    "search_recency_filter": ["recency", "freshness", "time_filter", "date_filter"]
+  },
+  "target_tool": "web_search_prime",
   "target_param": "search_query",
   "log_level": "info"
 }

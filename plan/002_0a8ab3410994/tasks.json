@@ -508,7 +508,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T4.S2",
                   "title": "Update config.example.json to v2 schema + rewrite doc.go package comment",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
