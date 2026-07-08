@@ -60,14 +60,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "SDK integration, infrastructure extraction, and v1 deletion",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add the official Go MCP SDK as the sole dependency. Extract the logger and health handler from main.go into logger.go and health.go (behavior unchanged). Mount mcp.NewStreamableHTTPHandler in main.go as the catch-all route (no tools registered yet). Delete the v1 proxy.go, sse.go, rewrite.go and their six test files. The binary must boot and /healthz must return 200.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Add SDK dependency; extract logger→logger.go and health→health.go; update logStartup",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -86,7 +86,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Mount SDK StreamableHTTPHandler in main.go; delete v1 proxy/sse/rewrite + tests",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S1"

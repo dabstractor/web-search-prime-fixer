@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,156 +9,23 @@ import (
 	"time"
 )
 
-// Log level ranks. A message is emitted only when its rank is >= the logger's
-// configured level (debug < info < warn < error).
-const (
-	levelDebug = iota // 0
-	levelInfo         // 1
-	levelWarn         // 2
-	levelError        // 3
-)
-
-// levelNum maps a level string to its numeric rank. An unrecognized or empty
-// level maps to levelInfo (the default; the logger never panics on a bad level).
-func levelNum(level string) int {
-	switch level {
-	case "debug":
-		return levelDebug
-	case "info":
-		return levelInfo
-	case "warn":
-		return levelWarn
-	case "error":
-		return levelError
-	default:
-		return levelInfo
-	}
-}
-
-// logger is a structured JSON logger. Each call to log writes exactly one JSON
-// object terminated by a newline to w, so the output is one log record per line.
-//
-// In production w is os.Stderr (PRD §15: structured JSON lines to stderr so
-// stdout stays clean for any process supervisor); in tests w is a *bytes.Buffer.
-//
-// Level filtering (debug < info < warn < error): a message is emitted only when
-// its level is >= the logger's configured level. For example, a logger created
-// with level "info" drops "debug" messages and emits "info", "warn", and "error".
-//
-// Each line has the fields: ts (RFC3339, UTC), level, msg, followed by the
-// caller-supplied context fields.
-//
-// SECURITY: request headers that carry secrets must never be logged verbatim.
-// Pass them through redactHeaders first — any header named Authorization, Cookie,
-// Set-Cookie, or Proxy-Authorization is replaced with the literal "<redacted>"
-// (PRD §6 "No secrets in logs", PRD §13).
-type logger struct {
-	w     io.Writer
-	level int
-}
-
-// newLogger returns a logger that writes JSON lines to w, honoring the given
-// level. The level string is one of "debug", "info", "warn", "error"; an
-// unrecognized or empty level is treated as "info".
-func newLogger(w io.Writer, level string) *logger {
-	return &logger{w: w, level: levelNum(level)}
-}
-
-// log writes one structured JSON line for the message if its level is enabled.
-//
-// The line is a JSON object with fields ts (RFC3339 UTC), level, and msg, plus
-// every key in fields added on top. If the message's level is below the logger's
-// configured level, nothing is written.
-func (l *logger) log(level string, msg string, fields map[string]any) {
-	if levelNum(level) < l.level {
-		return // below threshold: drop silently
-	}
-	m := map[string]any{
-		"ts":    time.Now().UTC().Format(time.RFC3339),
-		"level": level,
-		"msg":   msg,
-	}
-	for k, v := range fields {
-		m[k] = v
-	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		return // never emit malformed JSON; skip the line
-	}
-	_, _ = l.w.Write(append(b, '\n'))
-}
-
-// redactHeaders returns a copy of h safe to log. Every header name is preserved;
-// the value of any header whose canonical name is Authorization, Cookie,
-// Set-Cookie, or Proxy-Authorization is replaced with the literal "<redacted>"
-// (PRD §13). All other headers keep their original []string value. The input h
-// is not modified.
-func redactHeaders(h http.Header) map[string]any {
-	out := make(map[string]any, len(h))
-	for k, v := range h {
-		switch http.CanonicalHeaderKey(k) {
-		case "Authorization", "Cookie", "Set-Cookie", "Proxy-Authorization":
-			out[k] = "<redacted>"
-		default:
-			out[k] = v
-		}
-	}
-	return out
-}
-
-// version is the proxy's build version, surfaced by GET /healthz. It defaults to
-// "dev" and is overridden at link time:
-//
-//	go build -ldflags "-X main.version=<value>" -o web-search-prime-fixer .
-//
-// It MUST be a package-level var (not local to main) for the linker -X flag to
-// set it (PRD §16). Verified on-disk: default "dev"; ldflags injects any string.
-var version = "dev"
-
-// healthHandler serves GET /healthz. It writes 200 with a JSON body
-// {"ok":true,"version":<version>} and Content-Type application/json.
-//
-// It is a PURE local handler: it performs NO upstream call and reads NO network
-// resource, so it always answers quickly and never depends on z.ai health
-// (PRD §16: "Does not touch the upstream").
-//
-// METHOD (validation NOTE 6): PRD §16 specifies GET /healthz. A non-GET method
-// (POST/HEAD/DELETE/...) is answered with 405 Method Not Allowed so a health
-// probe that accidentally POSTs cannot masquerade as a liveness check.
-//
-// The body is produced with json.Marshal of two scalars (bool + string), which
-// cannot fail for our inputs; the write to the ResponseWriter is best-effort and
-// its error is ignored, matching net/http handler convention.
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	// PATTERN: set headers BEFORE WriteHeader (once WriteHeader is called, later
-	// Header mutations are ignored).
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	// Marshals to {"ok":true,"version":"<version>"} (keys sorted by json.Marshal;
-	// "ok" < "version"). HTML-escaping does not affect semver.
-	body, _ := json.Marshal(map[string]any{"ok": true, "version": version})
-	_, _ = w.Write(body)
-}
-
 // logStartup emits the "startup" log event: the resolved configuration the proxy
-// is actually running with (PRD §15). Fields: aliases (as a JSON array), listen,
-// upstream, log_level. NEVER credentials — Config carries no credential field
-// (PRD §13: Authorization is forwarded as a request header, never owned), so
-// logging cfg structurally cannot leak a secret.
+// is actually running with (PRD §15). Fields: tools (as a JSON array),
+// canonical_tool, query_aliases (as a JSON array), listen, upstream, log_level.
+// NEVER credentials — Config carries no credential field (PRD §13: Authorization
+// is forwarded as a request header, never owned), so logging cfg structurally
+// cannot leak a secret.
 //
 // Extracted as a named function (rather than inlined in main) so it is unit-
 // testable with an injected *bytes.Buffer writer via newLogger(&buf, level).
 func logStartup(l *logger, cfg Config) {
 	l.log("info", "startup", map[string]any{
-		"aliases":   cfg.Aliases, // []string -> JSON array
-		"listen":    cfg.Listen,
-		"upstream":  cfg.Upstream,
-		"log_level": cfg.LogLevel,
+		"tools":          cfg.Tools, // []string -> JSON array
+		"canonical_tool": cfg.CanonicalTool,
+		"query_aliases":  cfg.QueryAliases, // []string -> JSON array
+		"listen":         cfg.Listen,
+		"upstream":       cfg.Upstream,
+		"log_level":      cfg.LogLevel,
 	})
 }
 
