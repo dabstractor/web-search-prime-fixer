@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Config schema extension (config.go)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Extend the Config struct from 6 fields to the new PRD §18.1 schema (11 fields), update DefaultConfig to the v2 defaults, and add new validation rules to ResolveConfig.",
               "subtasks": [
                 {
@@ -41,7 +41,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Extend ResolveConfig validation for new rules (Tools, CanonicalTool, TargetTool)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"

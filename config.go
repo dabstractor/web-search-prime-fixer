@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 // Config is the resolved configuration for the web-search-prime-fixer
@@ -171,8 +172,9 @@ func fileExists(name string) bool {
 	return err == nil
 }
 
-// ResolveConfig discovers, loads, env-overrides, and validates the proxy
-// configuration, returning a fully-validated Config ready for startup (PRD §14.3).
+// ResolveConfig discovers, loads, env-overrides, and validates the normalizing
+// MCP server configuration, returning a fully-validated Config ready for startup
+// (PRD §18.3).
 //
 // # Discovery precedence (resolveConfigPath)
 //
@@ -193,14 +195,19 @@ func fileExists(name string) bool {
 //	WSPF_LISTEN     -> Config.Listen
 //	WSPF_LOG_LEVEL  -> Config.LogLevel
 //
-// An empty env var is ignored (the file/default value is kept). Path and Aliases
-// have NO env override.
+// An empty env var is ignored (the file/default value is kept). Path, Tools,
+// CanonicalTool, CanonicalParam, QueryAliases, OptionalAliases, TargetTool, and
+// TargetParam have NO env override.
 //
-// # Validation (returns a clear, wrapped error on failure)
+// # Validation (returns a clear error on the first failure; main.go exits non-zero)
 //
 //   - Listen must be a parseable host:port (net.SplitHostPort).
 //   - Upstream must be an absolute URL (url.Parse succeeds and URL.IsAbs reports
 //     a non-empty scheme).
+//   - Tools must be non-empty (the server always advertises >= the canonical tool).
+//   - Tools must contain CanonicalTool (Tools[0] is canonical).
+//   - No Tools entry may equal TargetTool (never advertise z.ai's real name;
+//     PRD §9.3, §18.3).
 //
 // After validation, if TargetParam is empty it is forced to "search_query".
 //
@@ -239,7 +246,27 @@ func ResolveConfig() (Config, error) {
 		return cfg, fmt.Errorf("upstream URL %q is not absolute (missing scheme)", cfg.Upstream)
 	}
 
-	// Force TargetParam if empty (PRD §14.3).
+	// Validate Tools (PRD §18.3) — three rules guarding what the server advertises.
+	// These run after the Listen/Upstream checks and before the TargetParam forcing.
+	//   (a) Tools must be non-empty: the server always advertises >= the canonical tool.
+	//   (b) Tools must contain CanonicalTool: Tools[0] is canonical and tool
+	//       registration + the teaching signal key off it.
+	//   (c) No Tools entry may equal TargetTool: TargetTool is z.ai's real name
+	//       ("web_search_prime"), which the server must NEVER advertise
+	//       (PRD §9.3, §18.3, §3 non-goals).
+	// Like the "upstream not absolute" rule above, these are pure logical checks
+	// with no underlying error to %w-wrap; they return a plain, clear fmt.Errorf.
+	if len(cfg.Tools) == 0 {
+		return cfg, fmt.Errorf("tools list must not be empty")
+	}
+	if !slices.Contains(cfg.Tools, cfg.CanonicalTool) {
+		return cfg, fmt.Errorf("tools list must contain the canonical tool %q", cfg.CanonicalTool)
+	}
+	if slices.Contains(cfg.Tools, cfg.TargetTool) {
+		return cfg, fmt.Errorf("tools list must not contain the target tool %q (it would advertise z.ai's real name)", cfg.TargetTool)
+	}
+
+	// Force TargetParam if empty (PRD §18.3).
 	if cfg.TargetParam == "" {
 		cfg.TargetParam = "search_query"
 	}
