@@ -73,7 +73,28 @@ func TestExtract(t *testing.T) {
 		{"nested_empty", `{"query":{}}`, ExtractionResult{}},
 		{"nested_array_no_string", `{"query":[1,2,3]}`, ExtractionResult{}},
 		{"nested_subkey_nonstring", `{"query":{"text":42}}`, ExtractionResult{}},
-		{"no_alias_string_s3boundary", `{"foo":"bar"}`, ExtractionResult{}},
+		{"no_alias_string_s3boundary", `{"foo":"bar"}`, ExtractionResult{Query: "bar", Source: "inferred:foo", Found: true}},
+		// Level 4b (S3): inference — no alias key yielded, so collect reachable
+		// non-empty strings (excluding optional keys), longest-wins, inferred:<path>.
+		{"infer_single", `{"foo":"bar"}`, ExtractionResult{Query: "bar", Source: "inferred:foo", Found: true}},
+		{"infer_multi_longest", `{"a":"short","b":"longest string"}`, ExtractionResult{Query: "longest string", Source: "inferred:b", Ambiguous: true, Found: true}},
+		{"infer_messages", `{"messages":[{"role":"user","content":"rust async"}]}`, ExtractionResult{Query: "rust async", Source: "inferred:messages[0].content", Ambiguous: true, Found: true}},
+		{"infer_nested_single", `{"a":{"b":"deep search text"}}`, ExtractionResult{Query: "deep search text", Source: "inferred:a.b", Found: true}},
+		{"infer_tie", `{"a":"xx","b":"yy"}`, ExtractionResult{Query: "xx", Source: "inferred:a", Ambiguous: true, Found: true}},
+		{"infer_skip_empty", `{"a":"","b":"real"}`, ExtractionResult{Query: "real", Source: "inferred:b", Found: true}},
+		{"infer_exclude_optional", `{"location":"France","description":"search rust"}`, ExtractionResult{Query: "search rust", Source: "inferred:description", Optionals: map[string]any{"location": "France"}, Found: true}},
+		{"infer_exclude_optalias", `{"country":"France","description":"search rust"}`, ExtractionResult{Query: "search rust", Source: "inferred:description", Optionals: map[string]any{"location": "France"}, Found: true}},
+		// Level 4a + optional normalization (S3): optionals attached to alias-scan
+		// success returns; shallow, canonical-first, nil when none.
+		{"alias_plus_optional", `{"q":"rust","country":"France"}`, ExtractionResult{Query: "rust", Source: "q", Optionals: map[string]any{"location": "France"}, Found: true}},
+		{"canon_wins_over_alias", `{"q":"rust","location":"US","country":"France"}`, ExtractionResult{Query: "rust", Source: "q", Optionals: map[string]any{"location": "US"}, Found: true}},
+		{"multi_optionals", `{"q":"rust","country":"France","size":"large","recency":"day"}`, ExtractionResult{Query: "rust", Source: "q", Optionals: map[string]any{"location": "France", "content_size": "large", "search_recency_filter": "day"}, Found: true}},
+		{"array_obj_optionals", `[{"q":"x","country":"FR"}]`, ExtractionResult{Query: "x", Source: "array[0]", Optionals: map[string]any{"location": "FR"}, Found: true}},
+		// Level 5 (S3): failure — no usable string anywhere -> zero value.
+		{"fail_no_strings", `{"a":1,"b":true}`, ExtractionResult{}},
+		{"fail_only_optional", `{"location":"France"}`, ExtractionResult{}},
+		{"fail_array_nons", `{"a":[1,2]}`, ExtractionResult{}},
+		{"fail_all_empty", `{"a":"","b":""}`, ExtractionResult{}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,5 +121,95 @@ func TestExtract_PureAndDeterministic(t *testing.T) {
 	// Nil raw (arguments field omitted entirely).
 	if got := extract(nil, extractQA, extractOpt); got.Found {
 		t.Fatalf("nil raw -> Found=true, want false: %+v", got)
+	}
+}
+
+func TestToUpstreamArgs(t *testing.T) {
+	// ToUpstreamArgs builds the clean z.ai payload (PRD §10.3): exactly
+	// targetParam -> Query plus normalized optionals; alias names and
+	// unrecognized keys are dropped. Built from real extract() results so the
+	// source-label/optional path is exercised end-to-end.
+	tests := []struct {
+		name       string
+		raw        string
+		target     string
+		wantArgs   map[string]any
+		wantCalled bool // false = Found==false, ToUpstreamArgs would not be called upstream
+	}{
+		{
+			"no_optionals",
+			`{"q":"rust"}`,
+			"search_query",
+			map[string]any{"search_query": "rust"},
+			true,
+		},
+		{
+			"with_optional",
+			`{"q":"rust","country":"France"}`,
+			"search_query",
+			map[string]any{"search_query": "rust", "location": "France"},
+			true,
+		},
+		{
+			"dropped_junk",
+			`{"q":"rust","junk":1,"country":"France"}`,
+			"search_query",
+			map[string]any{"search_query": "rust", "location": "France"},
+			true,
+		},
+		{
+			"multi_optionals",
+			`{"q":"rust","country":"France","size":"large","recency":"day"}`,
+			"search_query",
+			map[string]any{"search_query": "rust", "location": "France", "content_size": "large", "search_recency_filter": "day"},
+			true,
+		},
+		{
+			"inferred_no_optionals",
+			`{"foo":"bar"}`,
+			"search_query",
+			map[string]any{"search_query": "bar"},
+			true,
+		},
+		{
+			"inferred_with_optional",
+			`{"location":"France","description":"search rust"}`,
+			"search_query",
+			map[string]any{"search_query": "search rust", "location": "France"},
+			true,
+		},
+		{
+			"array_obj_optionals",
+			`[{"q":"x","country":"FR"}]`,
+			"search_query",
+			map[string]any{"search_query": "x", "location": "FR"},
+			true,
+		},
+		{
+			"custom_target_param",
+			`{"q":"rust"}`,
+			"q_param",
+			map[string]any{"q_param": "rust"},
+			true,
+		},
+		{
+			"failure_not_called_upstream",
+			`{}`,
+			"search_query",
+			map[string]any{"search_query": ""},
+			false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res := extract(json.RawMessage(tc.raw), extractQA, extractOpt)
+			if res.Found != tc.wantCalled {
+				t.Fatalf("Found=%v want %v", res.Found, tc.wantCalled)
+			}
+			got := res.ToUpstreamArgs(tc.target)
+			if !reflect.DeepEqual(got, tc.wantArgs) {
+				t.Errorf("ToUpstreamArgs(%q) = %#v\nwant             %#v", tc.target, got, tc.wantArgs)
+			}
+		})
 	}
 }

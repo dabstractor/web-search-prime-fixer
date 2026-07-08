@@ -141,14 +141,14 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Query Extraction (extract.go + extract_test.go)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Implement the pure, deterministic query-extraction function that pulls a search query string from arbitrary agent input (PRD §10). Handles every structure shape: bare string, scalar, array, object with alias keys (shallow and nested), inference (longest reachable string), optional-parameter normalization, and the failure path. Table-driven tests covering every PRD §19.1 case.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Query extraction function (extract.go)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Pure function over the inbound tool arguments (json.RawMessage). Returns the extracted query string, a source label, the normalized optionals, and a found flag. Implements the full PRD §10.1 precedence algorithm.",
               "subtasks": [
                 {
@@ -194,7 +194,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S3",
                   "title": "Inference fallback, optional normalization, failure path, and clean payload (levels 4b, 5, §10.2-10.3)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S2"
@@ -233,7 +233,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Canonical-pair detection + warning text generation (PRD §12.1, §12.2)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S3"
