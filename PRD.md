@@ -1,581 +1,660 @@
 # web-search-prime-fixer — Design Doc
 
-This document combines the product requirements (the *what* and *why*) with the
-technical design (the *how*) for `web-search-prime-fixer`. It is intended to be
-read once and implemented in a single pass by a coding agent.
+This document is the combined product requirements (the *what* and *why*) and
+technical design (the *how*) for `web-search-prime-fixer`. It is authoritative
+and implementation-ready.
 
-The common industry term for a combined requirements-plus-design document is a
-**Design Doc** (also called a Technical Design Document, TDD). An **RFC** is the
-related but different format used when a proposal is circulated *to solicit
-feedback before deciding*; this document is authoritative and implementation
-ready, so Design Doc is the accurate label.
+This is a **Design Doc**, not an RFC: it is not circulated to solicit feedback
+before deciding. The only items still open are minor shipped-defaults in
+section 23.
 
 ---
 
-## 1. Problem
+## 0. What changed since the first revision
 
-The z.ai `web-search-prime` MCP tool exposes a single required parameter,
-`search_query`. Agents routinely call it with a different parameter name instead
-(most often `query`). When that happens, the query is not applied, the call
-either returns empty or wrong results, and the agent retries, burning turns and
-API budget.
+The first revision specified a **transparent proxy** that forwarded `tools/list`
+verbatim from z.ai and rewrote only the `arguments` of outbound `tools/call`
+requests (`query` → `search_query`). That design was built and passed its tests,
+and then **failed in production** on its first real use. Section 1 explains why,
+with evidence from the live client. The fix required two changes, both reflected
+throughout this document:
 
-Observed real failures (from local agent session logs):
+1. **Client side.** Stop the MCP client from prefixing tool names, so agents can
+   call a tool by the obvious name. One config line (`toolPrefix: "none"`).
+2. **Server side.** Stop being a transparent proxy. Become a real **MCP server**
+   that advertises essentially one tool (`web_search`), accepts *any* arguments,
+   extracts the intended search query from whatever the agent sent, delegates one
+   clean call to z.ai, and — when usage was non-canonical — appends a warning
+   (with a correct-usage example) **after** the results.
 
-- `{"query": "..."}` instead of `{"search_query": "..."}` (most frequent)
-- `{"query": "...", ...}` mixed with correct fields
+The earlier "rename one parameter, forward everything else verbatim" philosophy
+is **superseded**. The new job is: *anything the agent sends at this server is a
+web search; figure out the query, run it, return the results, and warn about
+correct usage.*
 
-z.ai's schema already declares `search_query` correctly, but agents do not read
-it carefully enough. This has one root cause and one fix.
+## 1. Problem (revised, with evidence)
+
+Agents routinely fail 3–4 times before successfully calling z.ai's
+`web-search-prime` MCP tool. Two distinct failure layers cause this, and the
+old design addressed neither usefully.
+
+### 1.1 Layer 1 — the wrong tool NAME is rejected before any network hop
+
+The MCP client (pi, via `pi-mcp-adapter`) exposes every server's tools under a
+**prefixed** name by default. Verified in the installed adapter source:
+
+```ts
+// pi-mcp-adapter/init.ts
+const prefix = config.settings?.toolPrefix ?? "server";      // default "server"
+
+// pi-mcp-adapter/types.ts
+function formatToolName(toolName, serverName, prefix) {
+  const p = getServerPrefix(serverName, prefix);
+  return p ? `${p}_${toolName}` : toolName;                  // "server" -> web_search_<tool>
+}                                                            // "none"   -> <tool> (bare)
+```
+
+The tool-metadata cache stores the **bare** server name (`web_search_prime`),
+but the gateway surfaces the **prefixed** form. With the operator's server named
+`web_search`, the only tool the agent could call was `web_search_web_search_prime`.
+Every common first guess (`web_search`, `search`, `query`) was rejected **inside
+the client** — `Tool "web_search" not found. Use mcp({ search: "..." }) to
+search.` — *before any request reached our process.* The old proxy never saw
+these calls, so its argument rewrite never ran.
+
+### 1.2 Layer 2 — the wrong parameter NAME and the wrong SCHEMA
+
+When a call *does* reach a tool, the argument is wrong in two ways:
+
+- **Wrong parameter name:** `query` instead of `search_query`; the query under
+  `q`/`search`/`searchQuery`/`search_term`; extra junk params.
+- **Wrong schema / structure:** the query nested one level deep
+  (`{"input": {"query": "x"}}`), the value itself an object
+  (`{"query": {"text": "x"}}`), a chat-shaped `messages` array, a bare array
+  (`["x"]`), a bare string, a numeric value, etc.
+
+z.ai's real schema wants `search_query` (required) plus a small set of optional
+fields, and ignores or rejects the rest. Agents get both the name and the
+structure wrong, repeatedly.
+
+### 1.3 What the first revision got wrong
+
+It scoped the fix to a narrow slice of layer 2 (renaming one top-level key) on
+the assumption that a malformed `tools/call` would arrive at the proxy. In
+practice the layer-1 rejection happens first and locally, so the proxy sat on a
+path where its target failure almost never arrived. It also **forbade** (as a
+non-goal) the one intervention that could have helped at its own layer: rewriting
+`tools/list`. This revision inverts both mistakes and broadens the layer-2 fix
+from "rename a key" to "extract a query from arbitrary structure."
 
 ## 2. Goal
 
-Provide a small local proxy that sits between the agent's MCP client and z.ai.
-It does exactly one thing to outbound `tools/call` requests: if the arguments
-contain a known alias for `search_query`, rename it to `search_query`, forward
-the corrected call, and return the real results with a terse warning prepended
-so the agent learns the correct name and does not retry.
+Make an agent's first attempt at a web search succeed, regardless of how it
+guessed the tool name or mangled the arguments, while keeping the agent's context
+window clean and teaching it toward one canonical form.
 
-## 3. Non-goals (explicitly out of scope)
+Concretely, after this is deployed:
 
-The proxy MUST NOT do any of the following, even if it looks helpful. These were
-considered and rejected:
+- An agent that calls `web_search` with `{ "query": "..." }` gets correct results
+  on the **first** call, with no retry and no warning.
+- An agent that calls it with `{ "q": "..." }`, a bare string, a nested object,
+  a chat-shaped array, or extra junk params also succeeds on the first call.
+- An agent that guesses a different *advertised* tool name (e.g. `search`, if
+  configured) also succeeds.
+- The agent's tool list contains essentially **one** tool (`web_search`).
+- When the agent strays from the canonical form, it receives a **warning with a
+  correct-usage example**, appended **after** the results — never instead of them.
 
-- Infer or default `location`.
-- Normalize `content_size`, `search_recency_filter`, or any enum value.
-- Truncate, shorten, or otherwise modify the query text.
-- Drop, map, or warn about unsupported parameters (e.g. `max_results`,
-  `safe_search`). They pass through untouched.
-- Rewrite the tool schema or `tools/list` response. The schema is forwarded
-  verbatim from z.ai.
-- Manage API keys or rotate credentials.
-- Retry failed upstream calls, rate-limit, or cache results.
+## 3. Non-goals (revised)
 
-If a behavior is not "rename a configured alias to `search_query`", it is out of
-scope and must pass through unchanged.
+The proxy-era non-goals that forbade normalizing arguments are **dropped**. The
+new job is explicitly to normalize. The current non-goals are:
+
+- **Not a general search engine.** It delegates every query to z.ai's
+  `web_search_prime`. It does not synthesize, rank, cache, or invent results.
+- **Not a general-purpose or open proxy.** It binds to `127.0.0.1` and dials only
+  the configured z.ai upstream.
+- **No credential ownership.** It forwards the client's `Authorization` header to
+  z.ai and holds no key of its own.
+- **No retry / rate-limiting / caching of upstream calls.** One delegated call per
+  inbound call; surface upstream errors honestly.
+- **No truncation of the query text.** The extracted query is forwarded verbatim.
+- **No multi-tool semantics.** Every advertised tool does the same one thing (a
+  web search). Additional names exist only to catch guesses, not to offer
+  features.
+- **No z.ai-branded names advertised.** `web_search_prime` is never exposed to the
+  agent; models do not know it by default and it is not the surface we teach.
+- **Not responsible for other MCP servers' tool-name collisions** when the client
+  runs with `toolPrefix: "none"` (section 20); the operator owns that.
+
+Anything not listed is in scope if it serves "make the agent's first try work."
 
 ## 4. Users and context
 
-- Operator: a single developer running one local instance for their own agents.
-- Clients: any MCP client that speaks Streamable HTTP (pi, Claude Code, Cursor,
-  etc.). The client is configured exactly like the direct z.ai server, with only
-  the `url` changed to the local proxy.
-- Upstream: `https://api.z.ai/api/mcp/web_search_prime/mcp` (Streamable HTTP /
-  SSE MCP server, protocol `2024-11-05`).
+- **Operator:** a single developer running one local instance for their own
+  agents.
+- **Clients:** any MCP client that speaks Streamable HTTP (pi, Claude Code,
+  Cursor). Configured exactly like the direct z.ai server, except the `url`
+  points at this server **and** the client is set to expose bare tool names
+  (`toolPrefix: "none"` for pi; section 20).
+- **Upstream:** `https://api.z.ai/api/mcp/web_search_prime/mcp` (Streamable HTTP
+  / SSE MCP server). The real tool there is named `web_search_prime` and requires
+  `search_query`. That name is an internal implementation detail; the agent never
+  sees it.
 
-## 5. Functional requirements
+## 5. Solution overview (two parts)
 
-### FR-1 Transparent proxy
-The proxy speaks MCP Streamable HTTP / SSE. It forwards every JSON-RPC method
-(`initialize`, `notifications/*`, `tools/list`, `tools/call`, `ping`, etc.) to
-the upstream and streams the response back. Initialize negotiation, session IDs,
-headers, and the SSE event framing are preserved end to end.
+### 5.1 Part A — client unlock: bare tool names
 
-### FR-2 The one rewrite rule
-For an outbound `tools/call` request, if `params.arguments` contains any key in
-the configured alias list:
+Set the client to stop prefixing. For pi, add `settings.toolPrefix` to
+`~/.pi/agent/mcp.json` (section 20). Now whatever our server lists in
+`tools/list` is exactly what the agent types. Combined with advertising a tool
+named `web_search`, the most common first guess becomes directly callable with no
+discovery hop.
 
-- If `search_query` is absent, the first alias (in config order) is promoted to
-  `search_query`. Other aliases present are removed.
-- If `search_query` is already present, all aliases are removed (the canonical
-  value wins).
-- Any non-alias parameters are left untouched.
+This single change removes most layer-1 failures on its own, because the tool is
+no longer hidden behind an unguessable `web_search_web_search_prime` name.
 
-The alias list is configuration-driven (see FR-5 and section 14). No other
-argument mutation occurs.
+### 5.2 Part B — server rewrite: a normalizing MCP server
 
-### FR-3 Terse warning, results preserved
-When FR-2 changes anything, the proxy prepends one `text` content block to the
-matching `tools/call` result in the SSE response, ahead of the real result data.
-The original result content is unchanged and remains valid JSON. The proxy never
-sets `isError: true`. When nothing changed, the response is passed through
-byte-for-byte and no warning is added.
+`web-search-prime-fixer` becomes a real MCP server (not a byte proxy). It owns
+the JSON-RPC surface and delegates only the actual search:
 
-### FR-4 Credentials forwarded, not owned
-The client sends `Authorization: Bearer <key>` to the proxy exactly as it would
-to z.ai. The proxy forwards that header verbatim and holds no key of its own.
+| Client → us | Our response |
+| --- | --- |
+| `initialize` | our own `serverInfo` + `capabilities.tools` (no upstream call) |
+| `tools/list` | our generated tool list: essentially one tool, `web_search` (section 9) |
+| `tools/call` (any advertised tool) | extract query from arbitrary input (section 10) → delegate to z.ai `web_search_prime` (section 11) → return the result content, then append a warning+example if usage was non-canonical (section 12) |
+| `ping`, `notifications/*`, `resources/list`, `prompts/list`, `logging/setLevel`, `completion/complete` | handled locally (pong / ack / empty / method-not-found as appropriate) |
 
-### FR-5 Configuration
-A small config file defines the alias list and a few operational values
-(upstream URL, listen address, path, log level). Built-in defaults allow the
-proxy to run with no config file at all.
+The relationship to z.ai is inverted versus a proxy: instead of forwarding the
+client's request, we **act as an MCP client to z.ai** — one lazily-initialized
+session, reused across calls, re-initialized on expiry (section 11).
 
-## 6. Non-functional requirements
+## 6. Functional requirements
 
-- **Single binary, no external runtime dependencies.** Go, stdlib only.
-- **Local only.** Binds to `127.0.0.1`. Connects only to the configured upstream.
-  It is not a general-purpose or open proxy.
-- **Minimal overhead.** The common case (no alias present) must not buffer or
-  parse the response body; it streams straight through.
-- **No secrets in logs.** The `Authorization` header is never logged.
+### FR-1 MCP server (Streamable HTTP), built on the Go MCP SDK
+Speak MCP Streamable HTTP / SSE using the official
+`github.com/modelcontextprotocol/go-sdk` (decision locked, section 13).
+`NewStreamableHTTPHandler` owns initialize / `Mcp-Session-Id` / SSE framing /
+JSON-RPC dispatch / `tools/list` / `tools/call`; we provide the tool handlers.
+
+### FR-2 One advertised tool (plus optional alias names)
+Advertise essentially one tool — `web_search` — which carries the full
+description and schema we want the agent to learn. Additional names (e.g.
+`search`) may be configured to catch common guesses; they route to the identical
+handler and carry a terse description + minimal schema. **Never** advertise
+z.ai-branded names (`web_search_prime`). Defaults to a single entry
+(section 9.2).
+
+### FR-3 Permissive schema (so the client never rejects locally)
+`web_search`'s `inputSchema` must accept anything: declare `query` as the primary
+parameter, list the common aliases as optional, and set `additionalProperties:
+true`. A client that validates arguments against the schema (pi and others may)
+must never reject `{ "query": ... }` — or any other shape — locally, because that
+would reproduce the exact layer-2 failure we are eliminating. The schema's job is
+to *document* the canonical form, not to *enforce* it; enforcement is impossible
+to do helpfully (the client would just reject the call).
+
+### FR-4 Extract a query from ANY input
+For every `tools/call`, extract a search query string from `params.arguments`
+**regardless of structure** (section 10). The directive is: *whatever the model
+passed is treated as a search query somehow.* Accept any alias key at any depth;
+a bare string; a numeric/boolean (coerced); a single-string object; an array
+(first usable element); a nested wrapper; and, as a last resort, the longest
+reachable string. Recognized optional z.ai parameters (`location`,
+`content_size`, `search_recency_filter` and their aliases) are normalized and
+forwarded. **All other keys are dropped** so z.ai receives a schema-valid request.
+
+### FR-5 Upstream delegation
+Maintain one MCP client session to z.ai (via the SDK's `StreamableClientTransport`
++ `client.Connect`). On each inbound `tools/call`, send a single `tools/call` to
+z.ai's `web_search_prime` with `{search_query, ...}`, read the result content, and
+return it. Re-initialize the upstream session on session-expiry signals. Thread
+the client's `Authorization` header to z.ai.
+
+### FR-6 Teaching signal — a warning, appended after results, never instead of them
+When the agent used anything other than the canonical `web_search` / `query`,
+**append** one `text` content block — a **warning** that includes a short
+correct-usage **example** — **after** the real result content. The real results
+are always present in the same response, so the model does not retry. The warning
+is **never** returned without results when a search could be performed. The one
+exception: if extraction found no usable query at all (section 10.1.5), return
+the warning immediately and make no upstream call (there is nothing to return).
+**Never set `isError: true.** When usage was canonical, return results with no
+added warning.
+
+### FR-7 Credentials forwarded, not owned
+The client sends `Authorization: Bearer <key>` to us; we forward it verbatim to
+z.ai and hold no key. It is never logged (section 15).
+
+### FR-8 Configuration
+A config file defines the advertised tools, the extraction alias order, the
+canonical names, the upstream URL, the listen address, and the log level. Built-in
+defaults allow running with no config file.
+
+## 7. Non-functional requirements
+
+- **Single binary.** One Go binary. Depends on the official Go MCP SDK
+  (`github.com/modelcontextprotocol/go-sdk`); this is the sole external dependency.
+- **Local only.** Binds to `127.0.0.1`, dials only the configured upstream.
+- **Minimal context footprint.** The common case adds exactly one tool
+  (`web_search`) to the agent's context.
+- **No secrets in logs.** `Authorization` is never logged.
 - **Observability.** Structured JSON lines to stderr, including a line per
-  applied rewrite. Configurable level.
+  delegated call (which tool/param/structure was used, whether canonical, the
+  extraction source).
+- **Streaming preserved.** Long SSE result streams from z.ai are forwarded to the
+  client without a hard timeout; client cancellation propagates upstream.
 
-## 7. User experience
+## 8. Verified transport contract (z.ai upstream)
 
-### 7.1 Client configuration
-Identical to the direct z.ai config except the URL points at the proxy. Headers
-stay identical so the client still carries the key, which the proxy forwards:
+Established by direct probe (carried over from the first revision; still
+authoritative). With the SDK adopted, its `StreamableClientTransport` handles the
+framing, the `Accept` negotiation, and `Mcp-Session-Id` lifecycle; this section
+documents what our code must still account for:
+
+- **Endpoint:** `POST https://api.z.ai/api/mcp/web_search_prime/mcp`.
+- **Request headers:** `Content-Type: application/json`; `Accept` must contain
+  `text/event-stream` (z.ai returns empty results without it); `Authorization:
+  Bearer <key>` (client-supplied); `Mcp-Session-Id: <uuid>` after `initialize`.
+- **`initialize` response:** `200`, `content-type: text/event-stream`, response
+  header `mcp-session-id: <uuid>`.
+- **`tools/call` response:** SSE, one message of shape
+  `{"jsonrpc":"2.0","id":N,"result":{"content":[{"type":"text","text":"<json string>"}],"isError":false}}`.
+  The result payload is a JSON-encoded **string** (a stringified array), not an
+  object. We keep it intact when returning it to the client.
+
+## 9. Advertised tools and context minimization
+
+### 9.1 The hard constraint
+**It is impossible to catch a tool name the client has not been told about.**
+pi-mcp-adapter resolves names from the cached `tools/list` and rejects unknown
+names client-side before any network call (section 1.1). Therefore, to catch a
+wrong name we *must* advertise it, and advertising costs context. Fully "hiding
+alternatives until misuse" is not achievable.
+
+### 9.2 Why one tool is enough now
+Under `toolPrefix: "none"` (Part A) plus advertising a tool named `web_search`,
+the canonical name is itself the obvious, guessable name. Most agents will see
+`web_search` in their tool list and use it directly. We therefore advertise
+**one** tool by default. The layer-2 failures (wrong param, wrong schema) are
+handled entirely by extraction (section 10), which needs no extra advertised
+tools. An optional second name (`search`) may be configured if logs show agents
+guessing it; it is not in the default set.
+
+### 9.3 Default and rules
+- **Default advertised tools:** `["web_search"]` (single entry).
+- `web_search` carries the full description + documented schema (FR-3).
+- Any additionally-configured tool is a **terse alias**: one-line description
+  ("Performs a web search; alias of web_search."), minimal open schema
+  (`{"type":"object","additionalProperties":true}`), same handler.
+- **Never** advertise z.ai-branded names (`web_search_prime`, etc.).
+
+### 9.4 Canonical surface (what we document and teach)
+- **Tool:** `web_search`
+- **Parameter:** `query` (string, required)
+- **Optional:** `location`, `content_size`, `search_recency_filter` (passed
+  through to z.ai when provided).
+
+Canonical is `web_search` / `query`, exactly. Anything else triggers the warning.
+
+## 10. Query extraction (`extract.go`)
+
+Pure function over the inbound `params.arguments`. Deterministic; table-tested.
+The directive: *whatever the model passed is treated as a search query somehow.*
+Only when there is genuinely no usable string anywhere do we give up (10.1.5).
+
+### 10.1 Precedence
+1. `arguments` is a **string** → that is the query (source `bare-string`).
+2. `arguments` is a **number/boolean** → stringify (source `scalar`).
+3. `arguments` is an **array** → recurse on the first element that yields a query
+   (source `array[0]`); else fall through to 10.1.5.
+4. `arguments` is an **object** (the common case):
+   1. **Alias scan (shallow, then nested).** Walk the alias priority list
+      (config-driven; default `query`, `search_query`, `q`, `search`,
+      `searchQuery`, `search_term`, `term`, `text`, `input`, `prompt`,
+      `question`, `keywords`, `topic`, `searchString`). For the first present
+      key, resolve its value to a string: if the value is itself a string/number/
+      boolean, use it (coerced); if it is an object/array, **drill in** — look for
+      a sub-key in `text/value/content/query/q/data/input`, else the first
+      reachable string inside it (source `nested:<key>`).
+   2. **No alias matched → infer.** Recursively collect every reachable string
+      value, **excluding** keys that are recognized optionals or their aliases
+      (10.2). If exactly one candidate → use it (source `inferred:<key>`). If
+      several → use the **longest** (source `inferred:<key>`, `ambiguous=true`).
+5. **Nothing usable** (no strings anywhere: `{}`, `null`, a number/bool that
+   cannot be coerced to anything meaningful, an array of non-strings): extraction
+   **fails**. Per FR-6, return the warning immediately and make **no upstream
+   call**.
+
+### 10.2 Optional-parameter normalization
+Recognized optionals and their aliases (config-driven):
+- `location` ← `country`, `region`.
+- `content_size` ← `size`, `contentSize`, `detail`.
+- `search_recency_filter` ← `recency`, `freshness`, `time_filter`, `date_filter`.
+
+Values are forwarded under z.ai's canonical name. We do **not** validate or
+translate enum *values* (out of scope; if z.ai rejects a value, the error
+surfaces honestly). Optionals are read shallowly from the top-level object.
+
+### 10.3 What we send to z.ai
+Exactly: `search_query` (extracted) plus any recognized optionals that were
+provided. **Everything else is dropped.** This guarantees z.ai receives a
+schema-valid `tools/call` regardless of what the agent sent. (This inverts the
+first revision's "pass unknown params through untouched" stance — that stance is
+incompatible with "always send z.ai a clean call.")
+
+### 10.4 Extraction source is logged and surfaced
+The `source` (which key/structure the query came from, and `ambiguous`) is logged
+on every delegated call (section 15) and, when non-canonical, summarized in the
+warning so the agent can verify it guessed right.
+
+## 11. Upstream delegation (`upstream.go`)
+
+### 11.1 Session lifecycle
+- One shared MCP client session to z.ai (SDK `ClientSession`), initialized lazily
+  on first `tools/call`, using the inbound request's `Authorization` header.
+- The session (`mcp-session-id`) is reused across calls. Guarded by a mutex;
+  concurrent inbound calls may share it (z.ai keys are expected to tolerate
+  concurrent use).
+- On a session-expiry signal from z.ai (404 / invalid-session), re-run
+  `initialize` once transparently and retry the call. If it still fails, surface
+  the upstream error.
+
+### 11.2 Timeouts and cancellation
+- The outbound request lifetime is governed by the **client context** (the
+  agent's request cancellation propagates to z.ai), not a hard body timeout, so
+  long SSE result streams are not cut off.
+- A response-header timeout (~30s) detects a dead upstream quickly.
+
+### 11.3 Result handling
+Read z.ai's `tools/call` result content (the stringified-array `text` payload).
+If usage was non-canonical, **append** the warning+example text block **after**
+the result content (FR-6). Preserve the original content in order. Never set
+`isError`. If extraction failed (10.1.5), this step is skipped entirely — the
+warning was already returned and no upstream call was made.
+
+## 12. Teaching signal (`teach.go`)
+
+### 12.1 When a warning is added
+- **No warning** when: called tool == `web_search` **and** the query came from
+  the `query` parameter (the canonical call).
+- **Warning appended after results** otherwise: wrong tool name, wrong param
+  name, nested/inferred/bare-string/array extraction, or normalized optionals.
+- **Warning returned immediately (no results, no upstream call)** only when
+  extraction found no usable query (section 10.1.5).
+
+### 12.2 Warning text (with example)
+Appended after successful results — a **warning** plus a concrete correct-usage
+example:
+
+```
+[web-search-prime-fixer] Warning: this call used "<tool>"/"<source>" rather than the canonical form. Results are above. Next time call: web_search with { "query": "..." } — e.g. web_search({ "query": "rust async runtime" }).
+```
+
+When extraction was ambiguous or inferred, `<source>` reflects that (e.g.
+`inferred:messages[0].content`) so the agent can confirm it searched the right
+thing.
+
+When extraction failed entirely (the immediate, no-results case):
+
+```
+[web-search-prime-fixer] Warning: could not find a search query in the arguments; no search was run. Call: web_search with { "query": "..." } — e.g. web_search({ "query": "rust async runtime" }).
+```
+
+`isError` is never set for any normalization, guidance, or warning case.
+
+### 12.3 Why appended, and why results must accompany the warning
+A warning returned **without** results tempts the model to retry the tool call.
+We therefore run the search first and return results + warning together, with the
+warning trailing so the results are what the model acts on. The only note that
+travels without results is the "I could not find a query" warning, where there is
+genuinely nothing to return and a retry with correct input is exactly what we
+want.
+
+## 13. MCP SDK (decided: adopt the official SDK)
+
+We adopt the official **`github.com/modelcontextprotocol/go-sdk`**. Evaluated
+alternatives and rationale (recorded for context, not for re-decision):
+
+| | Official | Community |
+| --- | --- | --- |
+| Module | `github.com/modelcontextprotocol/go-sdk` | `github.com/mark3labs/mcp-go` |
+| Latest | **v1.6.1** (stable, post-1.0) | v0.55.1 (pre-1.0) |
+| Churn | low; ships a conformance suite | very high (~55 versions, frequent betas) |
+
+The community SDK was rejected (pre-1.0, heavy churn). Stdlib-only was rejected
+because the scope is now a full MCP **server** *and* an MCP **client** to z.ai,
+both over Streamable HTTP — exactly the surface the SDK exists to handle. The SDK
+owns the riskiest code: `NewStreamableHTTPHandler` (server transport:
+initialize, `Mcp-Session-Id`, SSE framing, JSON-RPC dispatch, `tools/list`,
+`tools/call`) and `StreamableClientTransport` + `client.Connect` +
+`session.CallTool` (client to z.ai). This retires the bug classes that bit the
+first attempt (SSE multi-line `data:` rejoining, comment/heartbeat preservation,
+HTML escaping, the >64 KiB line-length scanner limit, the required
+`Accept: text/event-stream` token, `Mcp-Session-Id` lifecycle). Our
+normalize → delegate → teach logic sits cleanly above the SDK in the tool handler
+we pass to `AddTool`. The cost is one dependency (acceptable); the original
+"build fully offline / no `go.sum`" purity is explicitly relinquished.
+
+## 14. Architecture and file layout
+
+```
+MCP client (pi / Claude Code / Cursor)  -- toolPrefix: "none" --
+   |  POST /mcp  (JSON-RPC over HTTP, SSE responses)
+   v
+web-search-prime-fixer   <-- 127.0.0.1:8787, Go binary (Go MCP SDK)
+   |  - owns tools/list (one tool: web_search)
+   |  - on tools/call: extract query -> delegate -> return results (+ trailing warning)
+   v
+https://api.z.ai/api/mcp/web_search_prime/mcp   (one client session)
+```
+
+Routes: `/healthz` → health handler; everything else → the SDK's
+`StreamableHTTPHandler`.
+
+```
+web-search-prime-fixer/
+  go.mod                 module web-search-prime-fixer; go 1.22+; requires github.com/modelcontextprotocol/go-sdk
+  main.go                config load, server bootstrap (mount StreamableHTTPHandler), graceful shutdown
+  config.go              Config struct, defaults, file + env loading
+  server.go              register advertised tools (AddTool), dispatch handler: extract -> delegate -> teach
+  tools.go               tool definitions: canonical schema + (optional) terse aliases
+  extract.go             query extraction from arbitrary structure (pure, table-tested)
+  upstream.go            z.ai MCP client (SDK): lazy session, re-init, CallTool
+  teach.go               canonical set + warning text (with example) + append-after-results rule
+  logger.go              redacting structured JSON logger
+  health.go              /healthz handler (or inline in main.go)
+  doc.go                 package comment
+  config.example.json    documented example config
+  README.md              install + run + client config (incl. toolPrefix:none)
+  extract_test.go        table-driven extraction tests (every structure shape)
+  teach_test.go          canonical/warning + append-order + no-results-case tests
+  server_test.go         end-to-end via SDK in-memory transport with a fake z.ai
+  upstream_test.go       session lifecycle + re-init tests
+  testdata/              golden fixtures (initialize, tools_call)
+  PRD.md                 this design doc
+```
+
+Kept from the first revision: `config.go` (extended), the redacting JSON logger,
+`/healthz`, graceful shutdown. Removed: the byte-forwarding `proxy.go` and the
+verbatim-`tools/list` passthrough (and, with the SDK, the hand-rolled SSE
+reader/writer). Added: `server.go`, `tools.go`, `extract.go`, `upstream.go`,
+`teach.go`.
+
+## 15. Logging
+
+Structured JSON lines to stderr (stdout stays clean). Redacting logger wraps
+output; any header named `Authorization`, `Cookie`, `Set-Cookie`, or
+`Proxy-Authorization` prints as `<redacted>`.
+
+Events:
+- `startup`: resolved config (advertised tools, alias order, canonical, listen,
+  upstream, log level). Never credentials.
+- `delegate`: per `tools/call` — `called_tool`, `source` (where the query came
+  from: `query`/`bare-string`/`nested:...`/`inferred:...`/`ambiguous`), `canonical`
+  (bool), `optionals` (normalized names provided), `warning` (bool), upstream
+  status, latency.
+- `extract_failed`: when section 10.1.5 triggered (no upstream call made).
+- `upstream_error`: non-2xx / session-expiry / re-init attempts.
+- `shutdown`: on signal.
+
+Levels honored; `debug` adds the raw inbound `arguments` shape (never headers).
+
+## 16. Health and operations
+
+- `GET /healthz` → `200` with `{"ok":true,"version":"<version>"}`. Does not touch
+  the upstream. Version via `-ldflags "-X main.version=..."`, default `dev`.
+- Graceful shutdown: on `SIGINT`/`SIGTERM`, `server.Shutdown(ctx)` with a 10s
+  deadline, then exit. In-flight upstream calls are cancelled via context.
+
+## 17. Headers, credentials, security
+
+- Forward `Authorization` verbatim to z.ai; never read, log, or store it.
+- Dial only `cfg.Upstream`. No path/host forwarding; not usable as an open proxy.
+- Bind `127.0.0.1` only. TLS termination unnecessary (loopback HTTP to a TLS
+  upstream).
+
+## 18. Configuration (`config.go`)
+
+### 18.1 Schema
+```go
+type Config struct {
+    Upstream        string              // z.ai MCP endpoint
+    Listen          string              // bind address
+    Path            string              // reserved (informational; default "/mcp")
+    Tools           []string            // advertised tool names; Tools[0] is canonical
+    CanonicalTool   string              // default "web_search"
+    CanonicalParam  string              // default "query"
+    QueryAliases    []string            // extraction key priority order
+    OptionalAliases map[string][]string // z.ai canonical optional <- aliases
+    TargetTool      string              // z.ai tool to call (always "web_search_prime")
+    TargetParam     string              // z.ai param (always "search_query")
+    LogLevel        string              // debug | info | warn | error
+}
+```
+
+### 18.2 Defaults
+- `Upstream`: `https://api.z.ai/api/mcp/web_search_prime/mcp`
+- `Listen`: `127.0.0.1:8787`
+- `Path`: `/mcp`
+- `Tools`: `["web_search"]` (single entry; `search` may be added to catch that
+  guess; never `web_search_prime`)
+- `CanonicalTool`: `web_search`; `CanonicalParam`: `query`
+- `QueryAliases`: `["query","search_query","q","search","searchQuery","search_term","term","text","input","prompt","question","keywords","topic","searchString"]`
+- `OptionalAliases`: `{ "location": ["country","region"], "content_size": ["size","contentSize","detail"], "search_recency_filter": ["recency","freshness","time_filter","date_filter"] }`
+- `TargetTool`: `web_search_prime`; `TargetParam`: `search_query`
+- `LogLevel`: `info`
+
+With these defaults the server runs with no config file at all.
+
+### 18.3 Discovery and precedence
+1. `WSPF_CONFIG`, else first existing of `./web-search-prime-fixer.json`,
+   `$XDG_CONFIG_HOME/web-search-prime-fixer/config.json`.
+2. If none found, use defaults.
+3. Env overrides (highest): `WSPF_UPSTREAM`, `WSPF_LISTEN`, `WSPF_LOG_LEVEL`.
+4. Unknown JSON fields ignored. Validation: `Listen` parses, `Upstream` is an
+   absolute URL, `Tools` is non-empty and contains `CanonicalTool`, and no entry
+   equals `TargetTool` (we never advertise z.ai's real name); else exit with a
+   clear error.
+
+## 19. Test plan
+
+### 19.1 `extract_test.go`
+Table-driven over every structure: each alias key (shallow); nested wrapper
+(`{"input":{"query":"x"}}`); value-is-object (`{"query":{"text":"x"}}`);
+bare-string `arguments`; numeric/boolean coercion; single-string object;
+multi-string (longest-wins, `ambiguous`); array (`["x"]`, array-of-objects with a
+string inside); chat-shaped `messages`; empty object; `null`. Assert extracted
+query, source label, forwarded optionals, dropped keys, and the failure path
+(10.1.5).
+
+### 19.2 `teach_test.go`
+Assert: no warning for canonical; warning **appended after** results for every
+other case; the immediate no-results warning when extraction fails; `isError`
+never set; example text present and correct.
+
+### 19.3 `server_test.go` (end-to-end)
+Fake z.ai via the SDK's in-memory transport (or `httptest`) that records the
+`tools/call` it receives. Cases:
+1. `web_search` + `{ "query": "x" }` → upstream gets `web_search_prime`/
+   `search_query` exactly; client gets results, no warning.
+2. `web_search` + `{ "q": "x", "junk": 1 }` → upstream gets clean `search_query`;
+   junk dropped; client gets results **then** warning.
+3. `web_search` + bare-string / nested / array argument → extracted and forwarded;
+   results + warning.
+4. `web_search` + `{}` → no upstream call; client gets the immediate no-results
+   warning, `isError:false`.
+5. `tools/list` advertises exactly `Tools`; only `web_search` carries a full
+   description; never `web_search_prime`.
+6. Upstream session-expiry → one transparent re-init, then success.
+
+### 19.4 Golden fixtures
+`testdata/initialize.*` and `testdata/tools_call.*` captured from the verified
+wire format (section 8) for the upstream-client tests.
+
+## 20. Client configuration (the Part A unlock)
+
+`~/.pi/agent/mcp.json` — note the top-level `settings.toolPrefix`:
 
 ```json
 {
+  "settings": { "toolPrefix": "none" },
   "mcpServers": {
-    "web-search-prime": {
+    "web_search": {
       "type": "http",
       "url": "http://127.0.0.1:8787/mcp",
-      "headers": {
-        "Authorization": "Bearer your_api_key"
-      }
+      "headers": { "Authorization": "Bearer ${Z_AI_API_KEY}" }
     }
   }
 }
 ```
 
-### 7.2 What the agent sees
-On a misconfigured call, the agent receives the real search results plus a
-leading note, for example:
-
-```
-[web-search-prime-fixer] "query" is not a valid parameter; renamed to "search_query". Use "search_query" in future calls.
-```
-
-followed by the normal result payload. The agent does not need to retry.
-
-## 8. Verified transport contract (z.ai upstream)
-
-Established by direct probe of `https://api.z.ai/api/mcp/web_search_prime/mcp`.
-
-### Request
-- Method: `POST` (absolute path `/api/mcp/web_search_prime/mcp`).
-- Headers:
-  - `Content-Type: application/json`
-  - `Accept: application/json, text/event-stream` (the `text/event-stream`
-    token is REQUIRED; z.ai returns empty results without it)
-  - `Authorization: Bearer <key>` (client-supplied)
-  - `Mcp-Session-Id: <uuid>` on every request after `initialize`
-
-### `initialize` response
-- Status `200`.
-- `content-type: text/event-stream;charset=UTF-8`.
-- Response header `mcp-session-id: <uuid>` (new session; must be returned to the
-  client and resent on subsequent requests).
-- SSE body (note: real wire format has no space after `data`):
-
-```
-id:1
-event:message
-data:{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"logging":{},"tools":{"listChanged":true}},"serverInfo":{"name":"mcp-web-search-prime","version":"0.0.1"}}}
-```
-
-### `tools/call` response
-SSE with one message of the shape:
-
-```
-data:{"jsonrpc":"2.0","id":N,"result":{"content":[{"type":"text","text":"<json string>"}],"isError":false}}
-```
-
-The result payload is a JSON-encoded string (a stringified array), not an
-object. The proxy must keep it intact when injecting the warning.
-
-### SSE framing rules (for the parser/writer)
-- An event is a sequence of field lines (`id:`, `event:`, `data:`) terminated
-  by a blank line.
-- `data:` carries the JSON-RPC message. Preserve `id:` and `event:` fields when
-  re-emitting.
-- A `data:` value may itself contain newlines represented as multiple `data:`
-  lines that must be concatenated with `\n` on read and split again on write.
-  In practice z.ai emits a single `data:` line per message; the parser must
-  still handle the multi-line form correctly.
-
-### Session handling
-The proxy uses identity pass-through: the `mcp-session-id` returned by upstream
-on `initialize` is forwarded to the client unchanged, and the client's
-`Mcp-Session-Id` request header is forwarded to upstream unchanged. No session
-map is required. This is correct because each client receives and resends its
-own id.
-
-## 9. Architecture
-
-```
-MCP client (pi/Claude/Cursor)
-   |  POST /mcp  (JSON-RPC over HTTP, SSE responses)
-   v
-web-search-prime-fixer   <-- 127.0.0.1:8787, Go stdlib http.Server
-   |  - passthrough for everything
-   |  - on tools/call: alias -> search_query rename + warning
-   v
-https://api.z.ai/api/mcp/web_search_prime/mcp
-```
-
-The proxy is a single Go binary with one HTTP listener and two routes:
-
-- `/healthz` -> health handler.
-- everything else -> MCP proxy handler.
-
-All MCP traffic (regardless of path) is forwarded to the single configured
-upstream URL. The incoming path is ignored for forwarding; only `/healthz` is
-intercepted.
-
-### File layout
-
-```
-web-search-prime-fixer/
-  go.mod                 module web-search-prime-fixer; go 1.22+
-  main.go                config load, server bootstrap, graceful shutdown
-  config.go              Config struct, defaults, file + env loading
-  proxy.go               HTTP handler: route passthrough vs rewrite
-  rewrite.go             alias -> search_query rule (pure function)
-  sse.go                 SSE reader: parse events; inject warning into result
-  doc.go                 package comment
-  config.example.json    documented example config
-  README.md              install + run
-  rewrite_test.go        table-driven rule tests
-  sse_test.go            SSE inject/passthrough tests
-  proxy_test.go          end-to-end handler tests (httptest)
-  PRD.md                 this design doc
-```
-
-No third-party dependencies. `go.mod` requires only the standard library.
-
-## 10. The rewrite rule (rewrite.go)
-
-Pure function over a `map[string]any` arguments object.
-
-```go
-// RewriteResult describes what happened.
-type RewriteResult struct {
-    Changed bool
-    Notes   []string // human-readable, one per affected alias
-}
-
-// Rewrite applies the alias->target rename to args in place.
-// aliases order matters: the first present alias is promoted when target is
-// absent. Non-alias keys are never touched.
-func Rewrite(args map[string]any, aliases []string, target string) RewriteResult
-```
-
-### Algorithm
-1. If `args` is nil or `target == ""` or `len(aliases) == 0`, return unchanged.
-2. Compute `present` = aliases (in config order) that exist as keys in `args`.
-3. If `present` is empty, return unchanged (no warning).
-4. If `target` is already a key in `args`:
-   - For each alias in `present`: delete it from `args`; append note
-     `ignored "<alias>" (use only "<target>")`.
-   - Return `Changed: true`.
-5. Else (target absent):
-   - `chosen = present[0]`.
-   - `args[target] = args[chosen]`; delete `args[chosen]`.
-   - Append note `"<chosen>" is not a valid parameter; renamed to "<target>"`.
-   - For each remaining alias in `present[1:]`: delete it; append note
-     `dropped redundant "<alias>"`.
-   - Return `Changed: true`.
-
-Notes are joined into the warning text (see section 12).
-
-### Examples
-
-| Input args | Output args | Notes |
-|---|---|---|
-| `{"query":"x"}` | `{"search_query":"x"}` | `renamed "query"` |
-| `{"searchQuery":"x"}` | `{"search_query":"x"}` | `renamed "searchQuery"` |
-| `{"q":"x"}` | `{"search_query":"x"}` | `renamed "q"` |
-| `{"query":"x","q":"y"}` | `{"search_query":"x"}` | `renamed "query"`, `dropped "q"` |
-| `{"query":"x","search_query":"y"}` | `{"search_query":"y"}` | `ignored "query"` |
-| `{"search_query":"x"}` | `{"search_query":"x"}` | (unchanged, no warning) |
-| `{"foo":"bar"}` | `{"foo":"bar"}` | (unchanged, no warning) |
-| `{}` | `{}` | (unchanged) |
-
-## 11. Request handling (proxy.go)
-
-### 11.1 Decide whether to rewrite
-1. Read the full request body into memory (MCP requests are small JSON-RPC
-   objects).
-2. Parse as JSON. MCP does not use batches; if the body is a JSON array, process
-   each element independently (defensive; re-serialize as an array).
-3. For each JSON-RPC object, if `method == "tools/call"`:
-   - Let `args = params.arguments` (object). If absent/non-object, skip.
-   - Call `Rewrite(args, cfg.Aliases, cfg.TargetParam)`.
-   - If `Changed`, re-serialize the object with the modified `params.arguments`
-     and remember the request `id` for response correlation.
-4. If nothing changed across all objects, set a per-request flag `streamThrough
-   = true` and forward the ORIGINAL body bytes (no re-serialization, to avoid
-   any formatting drift).
-5. If something changed, forward the re-serialized body and set `reqID =
-   <id>` (or the set of rewritten ids for a batch).
-
-### 11.2 Forward to upstream
-Build an outgoing `*http.Request`:
-- Method `POST`, URL = `cfg.Upstream` (fixed; incoming path ignored).
-- Body = original bytes (passthrough) or re-serialized bytes (rewrite).
-- Copy these request headers from the client verbatim: `Content-Type`,
-  `Accept`, `Authorization`, `Mcp-Session-Id`; also pass through
-  `Accept-Language`/`User-Agent` if present.
-- Do NOT forward hop-by-hop headers (`Connection`, `Keep-Alive`,
-  `Transfer-Encoding`, `TE`, `Trailer`, `Upgrade`, `Proxy-Authorization`,
-  `Proxy-Authenticate`).
-- Set `Accept` to the client's value if present; if the client omitted it, fall
-  back to `application/json, text/event-stream`. Do not otherwise modify a
-  client-provided `Accept` (passthrough per scope).
-- Use an `*http.Client` governed by per-request context cancellation rather than
-  a hard timeout, so long SSE streams are not cut off (see section 17).
-
-### 11.3 Write the response
-Forward these response headers from upstream verbatim: `Content-Type`,
-`Mcp-Session-Id`, `Cache-Control`, `Vary`, `X-Log-Id`, and any other non
-hop-by-hop headers. Strip hop-by-hop headers. Copy the upstream status code.
-
-Then:
-- If `streamThrough`: `io.Copy` the upstream body to the client unchanged.
-- Else: feed the upstream body through the SSE injector (section 12) keyed on
-  `reqID` before writing to the client.
-
-Flush after writing when the content type is SSE (use an `http.Flusher` if the
-client supports it) so streamed events are not buffered.
-
-## 12. SSE warning injection (sse.go)
-
-### 12.1 Reader
-A line scanner over the upstream body that yields decoded SSE events:
-
-```go
-type Event struct {
-    ID    string
-    Type  string // the "event:" field, default "message"
-    Data  string // concatenated "data:" lines joined with "\n"
-}
-```
-
-Parsing per RFC 8895 / the WHATWG SSE rules in summary:
-- Lines starting with `:` are comments; ignore.
-- `field: value` (strip one leading space after the colon if present).
-- Accumulate `data` lines (append with `\n`).
-- A blank line dispatches the accumulated event and resets the accumulator.
-- Buffer a final event if the stream ends without a trailing blank line.
-
-### 12.2 Inject
-For each decoded event:
-1. Parse `event.Data` as JSON. If it is not an object or its `id` is not in the
-   set of rewritten request ids, re-emit the event unchanged.
-2. Otherwise inspect `result`. If `result.content` is an array, prepend:
-   ```go
-   map[string]string{"type": "text", "text": warningText(notes)}
-   ```
-   Leave `isError` and all other fields untouched. If `result` is an error result
-   or has no `content` array, still log the rewrite but do not inject (nothing
-   to prepend to); re-emit unchanged.
-3. Re-serialize the modified JSON and re-emit the event with the original `id`
-   and `event` fields, encoding `data` with any internal newlines split back
-   into multiple `data:` lines.
-
-### 12.3 Warning text format
-`warningText(notes []string)` returns a single line:
-
-```
-[web-search-prime-fixer] <note[0]>; <note[1]>; ... . Use "search_query" in future calls.
-```
-
-Example for `{"query":"x"}`:
-
-```
-[web-search-prime-fixer] "query" is not a valid parameter; renamed to "search_query". Use "search_query" in future calls.
-```
-
-Example for `{"query":"x","q":"y"}`:
-
-```
-[web-search-prime-fixer] "query" is not a valid parameter; renamed to "search_query"; dropped redundant "q". Use "search_query" in future calls.
-```
-
-The `Use "search_query" in future calls.` suffix is omitted when every note is
-an "ignored" note (target was already correct), replaced by:
-`... Use only "search_query" to avoid this notice.`
-
-## 13. Headers, credentials, security
-
-- Forward `Authorization` verbatim. Never read, log, or store its value.
-- A redacting logger wraps stderr. Any header named `Authorization`,
-  `Cookie`, `Set-Cookie`, or `Proxy-Authorization` is printed as `<redacted>`.
-- The proxy dials only `cfg.Upstream`. There is no path or host forwarding; it
-  cannot be used as an open proxy.
-- Listen address defaults to `127.0.0.1` (loopback only).
-- TLS termination is unnecessary (loopback HTTP to a TLS upstream).
-
-## 14. Configuration (config.go)
-
-### 14.1 Schema
-```go
-type Config struct {
-    Upstream    string   // z.ai MCP endpoint
-    Listen      string   // bind address
-    Path        string   // reserved (informational; default "/mcp")
-    Aliases     []string // keys renamed to TargetParam
-    TargetParam string   // always "search_query"
-    LogLevel    string   // debug | info | warn | error
-}
-```
-
-JSON form:
-
-```json
-{
-  "upstream":    "https://api.z.ai/api/mcp/web_search_prime/mcp",
-  "listen":      "127.0.0.1:8787",
-  "path":        "/mcp",
-  "aliases":     ["query", "q", "search", "searchQuery", "search_term"],
-  "target_param":"search_query",
-  "log_level":   "info"
-}
-```
-
-### 14.2 Defaults (used when a field is empty or no file exists)
-- `Upstream`: `https://api.z.ai/api/mcp/web_search_prime/mcp`
-- `Listen`: `127.0.0.1:8787`
-- `Path`: `/mcp`
-- `Aliases`: `["query", "q", "search", "searchQuery", "search_term"]`
-- `TargetParam`: `search_query`
-- `LogLevel`: `info`
-
-With these defaults the proxy runs with no config file at all.
-
-### 14.3 Discovery and precedence
-1. Config path from env `WSPF_CONFIG`, else first existing of:
-   `./web-search-prime-fixer.json`,
-   `$XDG_CONFIG_HOME/web-search-prime-fixer/config.json` (default
-   `~/.config/web-search-prime-fixer/config.json`).
-2. If no file is found, use defaults.
-3. Env overrides (highest precedence): `WSPF_UPSTREAM`, `WSPF_LISTEN`,
-   `WSPF_LOG_LEVEL`.
-4. Parse with `encoding/json`. Unknown fields are ignored. Validation: `Listen`
-   must parse, `Upstream` must be an absolute URL; otherwise exit with a clear
-   error. `TargetParam` is forced to `search_query` if empty.
-
-`Path` is reserved for documentation/health routing sanity; the proxy forwards
-all non-`/healthz` paths to upstream regardless.
-
-## 15. Logging
-
-Structured JSON lines to stderr (so stdout stays clean for any process
-supervisor). Fields: `ts`, `level`, `msg`, plus context.
-
-Events:
-- `startup`: resolved config (aliases, listen, upstream, log level). Never logs
-  credentials.
-- `rewrite`: `req_id`, `tool` (if present), `notes` (the array), param presence
-  flags. Logged whenever FR-2 changes a call.
-- `upstream_error`: `status`, `req_id`, on non-2xx upstream responses.
-- `shutdown`: on signal.
-
-Levels honored; `debug` adds per-request `forward` lines with method/id and
-whether the response was streamed or injected.
-
-## 16. Health and operations
-
-- `GET /healthz` returns `200` with body `{"ok":true,"version":"<version>"}`.
-  Does not touch the upstream.
-- Version is injected at build via `-ldflags "-X main.version=..."` or defaults
-  to `dev`.
-- Graceful shutdown: on `SIGINT`/`SIGTERM`, call `server.Shutdown(ctx)` with a
-  10s deadline, then exit.
-
-## 17. Timeouts and robustness
-
-- Outgoing `*http.Client` uses a `Transport` with sensible dial/TLS/h2 defaults.
-- The overall request lifetime is governed by the client context (request
-  cancellation propagates to the upstream request via `req.WithContext`).
-- Avoid a hard `Client.Timeout` that would cut off long SSE streams; rely on
-  context cancellation instead. Use `ResponseHeaderTimeout` on the Transport
-  (default 30s) so a dead upstream is detected quickly.
-
-## 18. Building and running
-
-```bash
-go build -o web-search-prime-fixer .
-./web-search-prime-fixer                    # uses defaults, listens 127.0.0.1:8787
-WSPF_LISTEN=127.0.0.1:9000 ./web-search-prime-fixer
-WSPF_CONFIG=./my-config.json ./web-search-prime-fixer
-```
-
-Tests:
-
-```bash
-go test ./...
-```
-
-## 19. Test plan
-
-### 19.1 rewrite_test.go (table-driven)
-Each row: input args, expected args, expected notes substrings, expected
-`Changed`. Cover every row of the table in section 10, plus:
-- nil args, empty args.
-- args without any alias (no change).
-- alias list ordering (`q` before `query` changes which is promoted).
-- duplicate alias entries in config (de-duped, no double note).
-- non-string alias values (numbers, objects) are carried through as-is.
-
-### 19.2 sse_test.go
-- Decode a real-shape `tools/call` SSE event, inject a warning, assert the
-  result `content` array has the warning first and the original payload string
-  unchanged and still valid JSON.
-- Multi-`data:`-line event round-trips (split/rejoin preserves content).
-- Event whose `id` is not in the rewritten set is emitted verbatim.
-- Non-`tools/call` result (e.g. `initialize`) is emitted verbatim.
-- Error result (no `content` array) is emitted verbatim, rewrite still logged.
-
-### 19.3 proxy_test.go (httptest end-to-end)
-Stand up a fake upstream `httptest.Server` that:
-- Returns the `initialize` SSE response with a `mcp-session-id` header, and
-  asserts it receives a request with `Accept` containing `text/event-stream`.
-- Returns a canned `tools/call` SSE result.
-Cases:
-1. Client sends `{"query":"x"}`: upstream receives `search_query`; client
-   receives the result with the warning text block first.
-2. Client sends `{"search_query":"x"}`: upstream receives it unchanged; client
-   receives the result with NO extra block (byte-equal to upstream payload).
-3. `initialize` response reaches the client with the `mcp-session-id` header
-   intact and is then resent by a follow-up request (simulate by inspecting the
-   upstream-received `Mcp-Session-Id`).
-4. `Authorization` header from the client reaches the upstream unchanged and is
-   absent from the stderr log capture.
-5. `/healthz` returns 200 and does not call the upstream.
-
-### 19.4 Golden fixtures
-Include `testdata/initialize.sse` and `testdata/tools_call.sse` captured from the
-verified wire format (section 8) so tests do not depend on the live z.ai server.
-
-## 20. Implementation order (for the coding agent)
-
-1. `config.go` + defaults + a tiny `main.go` that serves `/healthz` and a
-   no-op passthrough handler. Verify it boots and proxies `initialize`.
-2. `rewrite.go` + `rewrite_test.go`; get the table green.
-3. `sse.go` + `sse_test.go` with the golden fixtures.
-4. `proxy.go`: wire rewrite into the request path and SSE injection into the
-   response path; add the redacting logger.
-5. `proxy_test.go` end-to-end with the fake upstream.
-6. `README.md` + `config.example.json`.
-7. `go vet ./...` and `go test ./...` clean.
-
-Do not add any normalization beyond the alias rename. If tempted to "also fix"
-location, recency, content_size, or unsupported params: do not. That is
-explicitly out of scope (see section 3).
-
-## 21. Success criteria
-
-- An agent that sends `{"query": "x"}` receives correct results on the first
-  call, with a one-line correction, and no retry.
-- An agent that sends `{"search_query": "x"}` sees zero difference from talking
-  to z.ai directly (no warning, identical results, identical schema).
-- No other parameter is ever modified.
-- The proxy runs as one Go binary with stdlib only and a one-line config change
-  on the client.
-
-## 22. Open defaults chosen (flag for review)
-
-These were picked to keep the implementation minimal. Override if any feel wrong:
-
-- Default alias list: `["query", "q", "search", "searchQuery", "search_term"]`.
-- Default listen address: `127.0.0.1:8787`, path `/mcp`.
-- Default upstream: the z.ai MCP endpoint in section 4.
-- Warning fires whenever an alias was present, including when `search_query` was
-  already correct (worded as "ignored"). This keeps the teaching signal
-  consistent. If you prefer silence when `search_query` is already correct, say
-  so.
+`toolPrefix: "none"` makes pi expose each tool by its bare name
+(`pi-mcp-adapter/types.ts` `formatToolName`), so `web_search` is callable as
+`web_search` rather than `web_search_web_search_prime`. This is global across all
+of the operator's MCP servers; it is safe for the operator's current
+`web_search` + `zread` set, and only matters if two servers ever advertise the
+same tool name.
+
+Equivalent configuration for other clients (Claude Code, Cursor) is whatever
+makes them expose bare tool names; document per-client in the README as needed.
+
+## 21. Implementation order
+
+1. `config.go` (extended) + `main.go` serving `/healthz` and a no-op SDK handler.
+2. `extract.go` + `extract_test.go`; table green.
+3. `teach.go` + `teach_test.go`.
+4. `upstream.go` + `upstream_test.go`: z.ai session via `StreamableClientTransport`,
+   `CallTool`, re-init.
+5. `tools.go` + `server.go`: register advertised tools (`AddTool`), wire the
+   dispatch handler (extract → delegate → return results, then append warning).
+6. `server_test.go` end-to-end with the fake upstream.
+7. `README.md` + `config.example.json` (including the Part A client config).
+8. `go vet ./...` and `go test ./...` clean.
+
+## 22. Success criteria
+
+- An agent that sends `web_search` / `{ "query": "x" }` gets correct results on
+  the first call, no retry, no warning.
+- An agent that sends any other parameter name or any mangled structure also
+  succeeds on the first call; a warning with a correct-usage example is appended
+  after the results.
+- When the input contains no usable query, the warning is returned immediately
+  (no upstream call) and tells the agent exactly how to call correctly.
+- The agent's tool list shows exactly one tool (`web_search`); no z.ai-branded
+  names are ever advertised.
+- z.ai always receives a schema-valid `web_search_prime` / `search_query` call.
+- Runs as one Go binary built on the official Go MCP SDK.
+
+## 23. Open decisions (minor shipped-defaults)
+
+1. **Teaching-note verbosity.** Keep the recommended single warning line with
+   example, or shorten further? (Agents reportedly read little of this.)
+2. **Whether to ship `search` as a second advertised tool** by default, or keep
+   the single `web_search` entry until logs justify adding it. (Configurable
+   regardless; this sets the shipped default.)
+
+The SDK decision, the single-tool default, the no-z.ai-branded-names rule, and
+the append-warning-after-results timing are all **decided** and reflected above.
