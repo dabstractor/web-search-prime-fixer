@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -17,11 +19,32 @@ import (
 
 // fakeState records what the fake z.ai received.
 type fakeState struct {
-	mu       sync.Mutex
-	calls    int32 // atomic count of tools/call handled
-	lastTool string
-	lastArgs map[string]any
-	lastAuth string // S2: the Authorization header the fake z.ai received (verbatim-forward proof)
+	mu        sync.Mutex
+	calls     int32 // atomic count of tools/call handled
+	lastTool  string
+	lastArgs  map[string]any
+	lastAuth  string // S2: the Authorization header the fake z.ai received (verbatim-forward proof)
+	liveID    string // S3: first Mcp-Session-Id observed (the live session)
+	expiredID string // S3: when non-empty, 404 requests carrying THIS id only
+	toolErr   error  // S3: when non-nil, the tool handler returns it (no call count)
+}
+
+// expire marks the currently-live z.ai session expired: subsequent requests
+// carrying THAT Mcp-Session-Id get a 404 "session not found" (the exact signal the
+// SDK maps to mcp.ErrSessionMissing). Models real z.ai evicting ONE session.
+func (st *fakeState) expire() {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.expiredID = st.liveID
+}
+
+// setToolErr arms a non-session error returned by the tool handler (used to drive
+// the honest-error / no-reinit tests). When non-nil, the handler returns it WITHOUT
+// incrementing st.calls.
+func (st *fakeState) setToolErr(e error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.toolErr = e
 }
 
 // newFakeZAI stands up a REAL MCP server ("fake-zai") over httptest that advertises
@@ -38,6 +61,14 @@ func newFakeZAI(t *testing.T) (*httptest.Server, *fakeState) {
 		Name:        "web_search_prime",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"search_query":{"type":"string"}},"additionalProperties":true}`),
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// S3: when armed, the tool handler returns a non-session error (honest-error
+		// / no-reinit tests). Do NOT count it (it models a failing upstream tool).
+		st.mu.Lock()
+		toolErr := st.toolErr
+		st.mu.Unlock()
+		if toolErr != nil {
+			return nil, toolErr
+		}
 		atomic.AddInt32(&st.calls, 1)
 		st.mu.Lock()
 		st.lastTool = req.Params.Name
@@ -48,13 +79,27 @@ func newFakeZAI(t *testing.T) (*httptest.Server, *fakeState) {
 		}}, nil
 	})
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return zai }, nil)
-	// S2: record the inbound Authorization the fake z.ai RECEIVES (initialize POST,
-	// tools/call POST, and SSE GET all pass through here) so tests can assert the
-	// UpstreamClient forwarded the client's header verbatim (PRD §17, FR-7).
+	// S2 records Authorization; S3 ALSO simulates session-expiry by 404'ing the
+	// expired Mcp-Session-Id. The first observed non-empty session-id is the live
+	// one; once expiredID is set, requests carrying THAT id get a 404 (the exact
+	// server-side signal the SDK maps to ErrSessionMissing). The re-init's
+	// initialize (no id) and the new session's id pass through untouched.
 	recording := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sid := r.Header.Get("Mcp-Session-Id")
 		st.mu.Lock()
 		st.lastAuth = r.Header.Get("Authorization")
+		if st.liveID == "" && sid != "" {
+			st.liveID = sid // first session-id observed
+		}
+		expired := st.expiredID != "" && sid == st.expiredID
 		st.mu.Unlock()
+		if expired {
+			// The MCP "MAY terminate → MUST answer 404" rule (spec §2.5.3). This
+			// fires BEFORE the SDK handler dispatches the tool, so it does NOT
+			// increment st.calls.
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
 		h.ServeHTTP(w, r)
 	})
 	srv := httptest.NewServer(recording)
@@ -316,5 +361,175 @@ func TestUpstreamClient_EnsureSessionError(t *testing.T) {
 	}
 	if u.session != nil {
 		t.Errorf("session should stay nil after a failed init (retryable), got non-nil")
+	}
+}
+
+// errFakeUpstreamTool is the sentinel the honest-error / no-reinit tests arm via
+// st.setToolErr. NOTE: a tool-handler error is flattened to a *jsonrpc2.WireError
+// at the JSON-RPC boundary (toWireError, messages.go:138) — the original sentinel
+// chain does NOT survive, so the client-side error only carries the MESSAGE text.
+// The tests therefore assert strings.Contains(err.Error(), errFakeUpstreamTool.Error())
+// (the verbatim tool failure) plus errors.Is(err, mcp.ErrSessionMissing) == false
+// (the property that actually distinguishes the honest-error path from re-init).
+var errFakeUpstreamTool = errors.New("fake z.ai tool failure")
+
+// TestUpstreamClient_SessionExpiryReinitSuccess: the PRD §11.1, §19.3 case 6 flow —
+// after the live z.ai session expires, a callTool transparently re-inits ONCE and
+// retries, returning the real result with a NEW session pointer.
+func TestUpstreamClient_SessionExpiryReinitSuccess(t *testing.T) {
+	srv, st := newFakeZAI(t)
+	u := &UpstreamClient{upstream: srv.URL, targetTool: "web_search_prime", targetParam: "search_query"}
+	t.Cleanup(func() {
+		if u.session != nil {
+			_ = u.session.Close()
+		}
+	})
+
+	ctx, cancel := testCtx(t)
+	defer cancel()
+
+	// First call: lazily creates the live session and succeeds.
+	res, err := u.callTool(ctx, map[string]any{"search_query": "first"})
+	if err != nil {
+		t.Fatalf("first callTool: %v", err)
+	}
+	if res == nil || res.IsError {
+		t.Fatal("first callTool: expected a real, non-error result")
+	}
+	oldSession := u.session
+	if oldSession == nil {
+		t.Fatal("session should be set after the first call")
+	}
+
+	// Expire the live session (z.ai evicted it). The next call's first attempt 404s.
+	st.expire()
+
+	// Second call: S3 detects ErrSessionMissing, re-inits ONCE, retries, succeeds.
+	res2, err := u.callTool(ctx, map[string]any{"search_query": "second"})
+	if err != nil {
+		t.Fatalf("second callTool (after expiry): %v (expected transparent re-init + retry)", err)
+	}
+	if res2 == nil || res2.IsError {
+		t.Fatal("second callTool: expected a real, non-error result after re-init")
+	}
+	if u.session == oldSession {
+		t.Error("expected a NEW session after re-init; session pointer unchanged")
+	}
+	// The failed first attempt of the 2nd call was 404'd before the tool handler,
+	// so st.calls == (first call) + (retry) == 2.
+	if got := atomic.LoadInt32(&st.calls); got != 2 {
+		t.Errorf("fake z.ai handled %d tool calls, want 2 (first + retry; the 404'd attempt is not a tool call)", got)
+	}
+}
+
+// TestUpstreamClient_ReinitRetryFailsHonestError (PRD §11.1 honest-error): the
+// re-init succeeds but the retry CallTool returns a non-ErrSessionMissing tool
+// error. callTool MUST surface that error honestly (nil result) and NOT synthesize.
+func TestUpstreamClient_ReinitRetryFailsHonestError(t *testing.T) {
+	srv, st := newFakeZAI(t)
+	var buf bytes.Buffer
+	u := &UpstreamClient{
+		upstream:    srv.URL,
+		targetTool:  "web_search_prime",
+		targetParam: "search_query",
+		log:         newLogger(&buf, "debug"),
+	}
+	t.Cleanup(func() {
+		if u.session != nil {
+			_ = u.session.Close()
+		}
+	})
+
+	ctx, cancel := testCtx(t)
+	defer cancel()
+
+	// First call establishes the live session and succeeds.
+	if _, err := u.callTool(ctx, map[string]any{"search_query": "first"}); err != nil {
+		t.Fatalf("first callTool: %v", err)
+	}
+	oldSession := u.session
+
+	// Expire, THEN arm a non-session tool error. The re-init's initialize +
+	// notifications/initialized do NOT invoke the tool handler, so the re-init
+	// succeeds; only the retry's CallTool hits the handler and returns the error.
+	st.expire()
+	st.setToolErr(errFakeUpstreamTool)
+
+	// Second call: 404 → ErrSessionMissing → re-init (succeeds) → retry (tool
+	// error). S3 MUST surface the retry's error honestly and return a nil result.
+	res, err := u.callTool(ctx, map[string]any{"search_query": "second"})
+	if err == nil {
+		t.Fatal("expected an honest error after the retry failed, got nil")
+	}
+	if res != nil {
+		t.Errorf("expected a nil result (no synthesis); got non-nil %v", res)
+	}
+	// The tool-handler error crosses the JSON-RPC boundary, which flattens it to a
+	// *WireError whose Message is err.Error() (toWireError, messages.go:138). The
+	// original sentinel chain does NOT survive, so we assert on the message text
+	// (the verbatim tool failure) rather than errors.Is, AND that it is NOT
+	// ErrSessionMissing (the property that actually distinguishes the paths).
+	if !strings.Contains(err.Error(), errFakeUpstreamTool.Error()) {
+		t.Errorf("expected the surfaced error to carry the tool failure text %q; got %v", errFakeUpstreamTool.Error(), err)
+	}
+	if errors.Is(err, mcp.ErrSessionMissing) {
+		t.Error("the surfaced error should be the TOOL error, not a session-missing error")
+	}
+	if u.session == oldSession {
+		t.Error("expected the re-init to have created a new session; pointer unchanged")
+	}
+	// S3 logged the session_expired event on detecting the expiry.
+	if !strings.Contains(buf.String(), `"msg":"upstream_error"`) ||
+		!strings.Contains(buf.String(), `"status":"session_expired"`) {
+		t.Errorf("expected a session_expired upstream_error log line; got:\n%s", buf.String())
+	}
+}
+
+// TestUpstreamClient_NonSessionErrorNoReinit (PRD §11.1): a non-ErrSessionMissing
+// error is surfaced verbatim WITHOUT triggering a re-init (proven by the ABSENCE
+// of the upstream_error log line, which S3 emits only on the ErrSessionMissing path).
+func TestUpstreamClient_NonSessionErrorNoReinit(t *testing.T) {
+	srv, st := newFakeZAI(t)
+	var buf bytes.Buffer
+	u := &UpstreamClient{
+		upstream:    srv.URL,
+		targetTool:  "web_search_prime",
+		targetParam: "search_query",
+		log:         newLogger(&buf, "debug"),
+	}
+	t.Cleanup(func() {
+		if u.session != nil {
+			_ = u.session.Close()
+		}
+	})
+
+	ctx, cancel := testCtx(t)
+	defer cancel()
+
+	// Arm a tool error BEFORE the first call, and arm NO expiry. The first (and
+	// only) CallTool POST carries the live session-id, which is NOT in expiredID
+	// (expiredID==""), so the wrapper forwards it -> the handler runs and returns
+	// the error. S3 must surface it verbatim and NOT re-init.
+	st.setToolErr(errFakeUpstreamTool)
+
+	_, err := u.callTool(ctx, map[string]any{"search_query": "x"})
+	if err == nil {
+		t.Fatal("expected the tool error to be surfaced, got nil")
+	}
+	// The tool-handler error is flattened to a *WireError at the JSON-RPC boundary
+	// (toWireError, messages.go:138), so the sentinel chain is lost. Assert on the
+	// message text (verbatim tool failure) and that it is NOT ErrSessionMissing.
+	if !strings.Contains(err.Error(), errFakeUpstreamTool.Error()) {
+		t.Errorf("expected the surfaced error to carry the tool failure text %q; got %v", errFakeUpstreamTool.Error(), err)
+	}
+	if errors.Is(err, mcp.ErrSessionMissing) {
+		t.Error("a non-session error should not look like ErrSessionMissing")
+	}
+	// PROOF that no re-init happened: the ONLY place S3 emits upstream_error is
+	// after detecting ErrSessionMissing. No expiry was armed, so no 404 was possible,
+	// so the ErrSessionMissing branch was never entered, so the `!errors.Is(...)`
+	// branch returned verbatim. Assert the log is empty of that event.
+	if strings.Contains(buf.String(), `"msg":"upstream_error"`) {
+		t.Errorf("non-session errors must NOT emit upstream_error (proves no re-init); got:\n%s", buf.String())
 	}
 }
