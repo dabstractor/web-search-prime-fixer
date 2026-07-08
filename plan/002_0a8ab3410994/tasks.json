@@ -439,14 +439,14 @@
               "type": "Task",
               "id": "P1.M5.T3",
               "title": "End-to-end tests (server_test.go)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "End-to-end tests via the SDK's in-memory transport or httptest with a fake z.ai that records the tools/call it receives. Covers all PRD §19.3 cases: canonical call, alias/junk, bare/nested/array, empty object, tools/list assertion, session-expiry re-init.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T3.S1",
                   "title": "E2E test harness + all PRD §19.3 cases (canonical, alias/junk, bare/nested/array, empty, tools/list, session-expiry)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T2.S1"
